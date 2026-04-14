@@ -1,0 +1,63 @@
+{
+	"name": "n8n-nodes-mem0-self",
+	"version": "0.1.0",
+	"description": "n8n community node for Mem0 Self-Hosted REST API",
+	"license": "MIT",
+	"author": {
+		"name": "Amaral Karl"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/kallbuloso/n8n-nodes-mem0-self.git"
+	},
+	"homepage": "https://github.com/kallbuloso/n8n-nodes-mem0-self#readme",
+	"bugs": {
+		"url": "https://github.com/kallbuloso/n8n-nodes-mem0-self/issues"
+	},
+	"main": "index.js",
+	"types": "dist/index.d.ts",
+	"files": [
+		"dist",
+		"index.js",
+		"README.md",
+		"package.json"
+	],
+	"scripts": {
+		"build": "tsc -p tsconfig.json && node scripts/copy-assets.js",
+		"dev": "tsc -w -p tsconfig.json",
+		"prepublishOnly": "npm run build"
+	},
+	"keywords": [
+		"n8n-community-node-package",
+		"n8n",
+		"mem0",
+		"memory",
+		"ai",
+		"llm",
+		"long-term-memory",
+		"semantic-search",
+		"vector-database",
+		"ai-agent",
+		"agent-id",
+		"langchain",
+		"self-hosted"
+	],
+	"engines": {
+		"node": ">=18.17"
+	},
+	"devDependencies": {
+		"typescript": "^5.6.3"
+	},
+	"peerDependencies": {
+		"n8n-workflow": "*"
+	},
+	"n8n": {
+		"n8nNodesApiVersion": 1,
+		"credentials": [
+			"dist/credentials/Mem0SelfHostedApi.credentials.js"
+		],
+		"nodes": [
+			"dist/nodes/Mem0/Mem0.node.js"
+		]
+	}
+}
