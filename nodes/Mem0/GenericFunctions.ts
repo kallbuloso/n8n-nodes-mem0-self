@@ -3,10 +3,11 @@ import type {
 	IHookFunctions,
 	ILoadOptionsFunctions,
 	IHttpRequestOptions,
+	ISupplyDataFunctions,
 } from 'n8n-workflow';
 import { NodeApiError } from 'n8n-workflow';
 
-type Ctx = IExecuteFunctions | IHookFunctions | ILoadOptionsFunctions;
+type Ctx = IExecuteFunctions | IHookFunctions | ILoadOptionsFunctions | ISupplyDataFunctions;
 
 /**
  * Extracts the memories array from an API response.

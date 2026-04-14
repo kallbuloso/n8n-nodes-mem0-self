@@ -1,29 +1,42 @@
-# n8n-nodes-mem0-selfhosted
+# n8n-nodes-mem0-self
 
-Community node for Mem0 Self-Hosted REST API in n8n.
+Community node for Mem0 Self-Hosted memory in n8n.
 
-## Safe Profile Endpoints
+## Included Node
 
-- `POST /memories` (store user + assistant interaction)
-- `POST /search` (search scoped by `user_id` + `agent_id`)
+- `Mem0 Chat Memory` (`mem0Memory`)
 
-This package intentionally does not expose destructive/admin operations in the node UI.
+This package is focused on AI Agent memory usage (safe profile) and intentionally avoids admin/destructive operations.
 
-## Required Identifiers
+## What It Does
 
-- `user_id` is mandatory
-- `agent_id` is mandatory
-- `run_id` is optional
+- Stores conversation turns in Mem0 using `POST /memories`
+- Retrieves contextual memory using `POST /search`
+- Scopes memory by:
+  - `user_id` (required)
+  - `agent_id` (required)
+  - `run_id` (optional)
 
-## Credential Defaults (Development)
+## Credential Setup
 
-- Base URL: `https://memor.curta.se`
-- API Key: set in n8n credentials (no hardcoded default in production)
+Credential type: `Mem0 Self-Hosted API`
 
-Header used by the node: `X-API-Key`.
+- Base URL default: `http://localhost:8000`
+- Header auth: `X-API-Key`
 
-## Production Notes
+## Safe Profile Notes
 
+- `clear()` is non-destructive (no-op) in this node.
+- If `run_id` is omitted, memory context is shared across sessions for the same `user_id + agent_id`.
 - Keep API keys only in n8n credential storage.
-- Use `run_id` when you need strict session isolation.
-- If `run_id` is omitted, memory context is shared across all sessions for the same `user_id + agent_id`.
+
+## Build
+
+```bash
+npm install
+npm run build
+```
+
+## License
+
+MIT

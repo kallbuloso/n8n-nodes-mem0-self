@@ -1,5 +1,5 @@
-import type { IExecuteFunctions, IHookFunctions, ILoadOptionsFunctions } from 'n8n-workflow';
-type Ctx = IExecuteFunctions | IHookFunctions | ILoadOptionsFunctions;
+import type { IExecuteFunctions, IHookFunctions, ILoadOptionsFunctions, ISupplyDataFunctions } from 'n8n-workflow';
+type Ctx = IExecuteFunctions | IHookFunctions | ILoadOptionsFunctions | ISupplyDataFunctions;
 /**
  * Extracts the memories array from an API response.
  * Self-hosted usually returns arrays directly, but can also wrap results in

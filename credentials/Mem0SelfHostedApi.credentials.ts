@@ -15,7 +15,7 @@ export class Mem0SelfHostedApi implements ICredentialType {
 			displayName: 'Base URL',
 			name: 'baseUrl',
 			type: 'string',
-			default: 'https://memor.curta.se',
+			default: 'http://localhost:8000',
 			required: true,
 			description: 'The base URL of your self-hosted Mem0 instance',
 		},

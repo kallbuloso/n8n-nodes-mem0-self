@@ -1,6 +1,6 @@
 {
 	"name": "n8n-nodes-mem0-self",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "n8n community node for Mem0 Self-Hosted REST API",
 	"license": "MIT",
 	"author": {
@@ -57,7 +57,7 @@
 			"dist/credentials/Mem0SelfHostedApi.credentials.js"
 		],
 		"nodes": [
-			"dist/nodes/Mem0/Mem0.node.js"
+			"dist/nodes/Mem0/Mem0Memory.node.js"
 		]
 	}
 }
