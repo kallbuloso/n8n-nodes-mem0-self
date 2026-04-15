@@ -96,7 +96,6 @@ class Mem0ChatHistory {
         this.ctx = ctx;
         this.scope = scope;
         this.maxMessageLength = options.maxMessageLength;
-        this.contextWindowLength = options.contextWindowLength;
     }
     normalizeRole(message) {
         const role = String(message?.role || message?.type || message?._getType?.() || '').toLowerCase();
@@ -108,13 +107,6 @@ class Mem0ChatHistory {
         if (typeof message === 'string')
             return message;
         return String(message?.content ?? '');
-    }
-    normalizeByTimestamp(memories) {
-        return [...memories].sort((a, b) => {
-            const aTs = new Date(a?.created_at || a?.updated_at || 0).getTime() || 0;
-            const bTs = new Date(b?.created_at || b?.updated_at || 0).getTime() || 0;
-            return aTs - bTs;
-        });
     }
     async append(role, content) {
         const normalized = String(content || '').trim();
@@ -131,13 +123,8 @@ class Mem0ChatHistory {
         });
     }
     async getMessages() {
-        const response = await GenericFunctions_1.mem0ApiRequest.call(this.ctx, 'GET', '/memories', {}, this.scope);
-        const rawMemories = (0, GenericFunctions_1.extractResults)(response);
-        const ordered = this.normalizeByTimestamp(rawMemories);
-        // Align with n8n chat-memory behavior: contextWindowLength represents exchanges.
-        const maxEntries = Math.max(1, this.contextWindowLength) * 2;
-        const windowed = ordered.slice(-maxEntries);
-        return windowed.map((entry) => toLangchainMessage(entry));
+        // Search-first mode: history retrieval is handled by loadMemoryVariables/query.
+        return [];
     }
     async addMessage(message) {
         const role = this.normalizeRole(message);
@@ -202,12 +189,33 @@ class Mem0Memory {
                     description: 'Optional conversation/session identifier',
                 },
                 {
-                    displayName: 'Context Window Length',
+                    displayName: 'Top K',
                     name: 'topK',
                     type: 'number',
                     default: 10,
                     typeOptions: { minValue: 1, maxValue: 50 },
-                    description: 'Number of recent exchanges to inject (internally converted to messages)',
+                    description: 'Maximum number of relevant memories to retrieve per query',
+                },
+                {
+                    displayName: 'Default Query',
+                    name: 'defaultQuery',
+                    type: 'string',
+                    default: '',
+                    description: 'Fallback search query when no user input is available',
+                },
+                {
+                    displayName: 'Rerank',
+                    name: 'rerank',
+                    type: 'boolean',
+                    default: false,
+                    description: 'Enable reranking in Mem0 search',
+                },
+                {
+                    displayName: 'Fields (Comma Separated)',
+                    name: 'fields',
+                    type: 'string',
+                    default: '',
+                    description: 'Optional fields list for search response',
                 },
                 {
                     displayName: 'Infer on Store',
@@ -216,36 +224,19 @@ class Mem0Memory {
                     default: false,
                     description: 'Legacy toggle kept for compatibility. Safe profile stores raw chat turns.',
                 },
-                {
-                    displayName: 'Default Query (Legacy)',
-                    name: 'defaultQuery',
-                    type: 'string',
-                    default: '',
-                    description: 'Legacy field kept for workflow compatibility (not used in persistent chat mode)',
-                },
-                {
-                    displayName: 'Rerank (Legacy)',
-                    name: 'rerank',
-                    type: 'boolean',
-                    default: false,
-                    description: 'Legacy field kept for workflow compatibility (not used)',
-                },
-                {
-                    displayName: 'Fields (Legacy)',
-                    name: 'fields',
-                    type: 'string',
-                    default: '',
-                    description: 'Legacy field kept for workflow compatibility (not used)',
-                },
             ],
         };
     }
     async supplyData(itemIndex) {
         const MAX_MESSAGE_LENGTH = 10000;
+        const MAX_QUERY_LENGTH = 2000;
         const userId = String(this.getNodeParameter('userId', itemIndex, '') || '').trim();
         const agentId = String(this.getNodeParameter('agentId', itemIndex, '') || '').trim();
         const runId = String(this.getNodeParameter('runId', itemIndex, '') || '').trim();
-        const contextWindowLength = Math.min(50, Math.max(1, Math.floor(Number(this.getNodeParameter('topK', itemIndex, 10) || 10))));
+        const topK = Math.min(50, Math.max(1, Math.floor(Number(this.getNodeParameter('topK', itemIndex, 10) || 10))));
+        const defaultQuery = String(this.getNodeParameter('defaultQuery', itemIndex, '') || '').trim();
+        const rerank = Boolean(this.getNodeParameter('rerank', itemIndex, false));
+        const fieldsInput = String(this.getNodeParameter('fields', itemIndex, '') || '').trim();
         if (!userId || !agentId) {
             throw new n8n_workflow_1.NodeOperationError(this.getNode(), 'User ID and Agent ID are required.');
         }
@@ -257,25 +248,59 @@ class Mem0Memory {
             scope.run_id = runId;
         const chatHistory = new Mem0ChatHistory(this, scope, {
             maxMessageLength: MAX_MESSAGE_LENGTH,
-            contextWindowLength,
         });
+        const searchMessages = async (values) => {
+            const rawQuery = String(values?.input || values?.query || values?.human_input || values?.chatInput || defaultQuery || '').trim();
+            if (!rawQuery)
+                return [];
+            if (rawQuery.length > MAX_QUERY_LENGTH) {
+                throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Search query is too long. Maximum supported length is ${MAX_QUERY_LENGTH} characters.`);
+            }
+            const body = {
+                query: rawQuery,
+                top_k: topK,
+                rerank,
+                ...scope,
+            };
+            if (fieldsInput) {
+                body.fields = fieldsInput
+                    .split(',')
+                    .map((field) => field.trim())
+                    .filter((field) => field.length > 0);
+            }
+            const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
+            const results = (0, GenericFunctions_1.extractResults)(response);
+            return results.map((entry) => toLangchainMessage(entry));
+        };
         const memory = BufferWindowMemory
-            ? new BufferWindowMemory({
-                memoryKey: 'chat_history',
-                chatHistory,
-                returnMessages: true,
-                inputKey: 'input',
-                outputKey: 'output',
-                k: contextWindowLength,
-            })
+            ? (() => {
+                class SearchFirstBufferMemory extends BufferWindowMemory {
+                    constructor(fields, retrieveFn) {
+                        super(fields);
+                        this.retrieveFn = retrieveFn;
+                    }
+                    async loadMemoryVariables(values) {
+                        const messages = await this.retrieveFn(values);
+                        return { [this.memoryKey]: messages };
+                    }
+                }
+                return new SearchFirstBufferMemory({
+                    memoryKey: 'chat_history',
+                    chatHistory,
+                    returnMessages: true,
+                    inputKey: 'input',
+                    outputKey: 'output',
+                    k: topK,
+                }, searchMessages);
+            })()
             : {
                 memoryKey: 'chat_history',
                 chatHistory,
                 returnMessages: true,
                 inputKey: 'input',
                 outputKey: 'output',
-                async loadMemoryVariables() {
-                    return { chat_history: await chatHistory.getMessages() };
+                async loadMemoryVariables(values) {
+                    return { chat_history: await searchMessages(values) };
                 },
                 async saveContext(inputValues, outputValues) {
                     const userInput = String(inputValues?.input || inputValues?.query || inputValues?.human_input || inputValues?.chatInput || '').trim();

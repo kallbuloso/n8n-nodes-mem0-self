@@ -112,15 +112,13 @@ type Mem0Scope = {
 
 class Mem0ChatHistory {
 	private readonly maxMessageLength: number;
-	private readonly contextWindowLength: number;
 
 	constructor(
 		private readonly ctx: ISupplyDataFunctions,
 		private readonly scope: Mem0Scope,
-		options: { maxMessageLength: number; contextWindowLength: number },
+		options: { maxMessageLength: number },
 	) {
 		this.maxMessageLength = options.maxMessageLength;
-		this.contextWindowLength = options.contextWindowLength;
 	}
 
 	private normalizeRole(message: any): 'user' | 'assistant' {
@@ -132,14 +130,6 @@ class Mem0ChatHistory {
 	private normalizeContent(message: any): string {
 		if (typeof message === 'string') return message;
 		return String(message?.content ?? '');
-	}
-
-	private normalizeByTimestamp(memories: any[]): any[] {
-		return [...memories].sort((a: any, b: any) => {
-			const aTs = new Date(a?.created_at || a?.updated_at || 0).getTime() || 0;
-			const bTs = new Date(b?.created_at || b?.updated_at || 0).getTime() || 0;
-			return aTs - bTs;
-		});
 	}
 
 	private async append(role: 'user' | 'assistant', content: string): Promise<void> {
@@ -161,15 +151,8 @@ class Mem0ChatHistory {
 	}
 
 	async getMessages(): Promise<any[]> {
-		const response = await mem0ApiRequest.call(this.ctx, 'GET', '/memories', {}, this.scope);
-		const rawMemories = extractResults(response);
-		const ordered = this.normalizeByTimestamp(rawMemories);
-
-		// Align with n8n chat-memory behavior: contextWindowLength represents exchanges.
-		const maxEntries = Math.max(1, this.contextWindowLength) * 2;
-		const windowed = ordered.slice(-maxEntries);
-
-		return windowed.map((entry: any) => toLangchainMessage(entry));
+		// Search-first mode: history retrieval is handled by loadMemoryVariables/query.
+		return [];
 	}
 
 	async addMessage(message: any): Promise<void> {
@@ -240,12 +223,33 @@ export class Mem0Memory implements INodeType {
 				description: 'Optional conversation/session identifier',
 			},
 			{
-				displayName: 'Context Window Length',
+				displayName: 'Top K',
 				name: 'topK',
 				type: 'number',
 				default: 10,
 				typeOptions: { minValue: 1, maxValue: 50 },
-				description: 'Number of recent exchanges to inject (internally converted to messages)',
+				description: 'Maximum number of relevant memories to retrieve per query',
+			},
+			{
+				displayName: 'Default Query',
+				name: 'defaultQuery',
+				type: 'string',
+				default: '',
+				description: 'Fallback search query when no user input is available',
+			},
+			{
+				displayName: 'Rerank',
+				name: 'rerank',
+				type: 'boolean',
+				default: false,
+				description: 'Enable reranking in Mem0 search',
+			},
+			{
+				displayName: 'Fields (Comma Separated)',
+				name: 'fields',
+				type: 'string',
+				default: '',
+				description: 'Optional fields list for search response',
 			},
 			{
 				displayName: 'Infer on Store',
@@ -254,40 +258,23 @@ export class Mem0Memory implements INodeType {
 				default: false,
 				description: 'Legacy toggle kept for compatibility. Safe profile stores raw chat turns.',
 			},
-			{
-				displayName: 'Default Query (Legacy)',
-				name: 'defaultQuery',
-				type: 'string',
-				default: '',
-				description: 'Legacy field kept for workflow compatibility (not used in persistent chat mode)',
-			},
-			{
-				displayName: 'Rerank (Legacy)',
-				name: 'rerank',
-				type: 'boolean',
-				default: false,
-				description: 'Legacy field kept for workflow compatibility (not used)',
-			},
-			{
-				displayName: 'Fields (Legacy)',
-				name: 'fields',
-				type: 'string',
-				default: '',
-				description: 'Legacy field kept for workflow compatibility (not used)',
-			},
 		],
 	};
 
 	async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
 		const MAX_MESSAGE_LENGTH = 10000;
+		const MAX_QUERY_LENGTH = 2000;
 
 		const userId = String(this.getNodeParameter('userId', itemIndex, '') || '').trim();
 		const agentId = String(this.getNodeParameter('agentId', itemIndex, '') || '').trim();
 		const runId = String(this.getNodeParameter('runId', itemIndex, '') || '').trim();
-		const contextWindowLength = Math.min(
+		const topK = Math.min(
 			50,
 			Math.max(1, Math.floor(Number(this.getNodeParameter('topK', itemIndex, 10) || 10))),
 		);
+		const defaultQuery = String(this.getNodeParameter('defaultQuery', itemIndex, '') || '').trim();
+		const rerank = Boolean(this.getNodeParameter('rerank', itemIndex, false));
+		const fieldsInput = String(this.getNodeParameter('fields', itemIndex, '') || '').trim();
 
 		if (!userId || !agentId) {
 			throw new NodeOperationError(this.getNode(), 'User ID and Agent ID are required.');
@@ -301,26 +288,73 @@ export class Mem0Memory implements INodeType {
 
 		const chatHistory = new Mem0ChatHistory(this, scope, {
 			maxMessageLength: MAX_MESSAGE_LENGTH,
-			contextWindowLength,
 		});
 
+		const searchMessages = async (values: any): Promise<any[]> => {
+			const rawQuery = String(
+				values?.input || values?.query || values?.human_input || values?.chatInput || defaultQuery || '',
+			).trim();
+
+			if (!rawQuery) return [];
+			if (rawQuery.length > MAX_QUERY_LENGTH) {
+				throw new NodeOperationError(
+					this.getNode(),
+					`Search query is too long. Maximum supported length is ${MAX_QUERY_LENGTH} characters.`,
+				);
+			}
+
+			const body: Record<string, unknown> = {
+				query: rawQuery,
+				top_k: topK,
+				rerank,
+				...scope,
+			};
+
+			if (fieldsInput) {
+				body.fields = fieldsInput
+					.split(',')
+					.map((field) => field.trim())
+					.filter((field) => field.length > 0);
+			}
+
+			const response = await mem0ApiRequest.call(this, 'POST', '/search', body);
+			const results = extractResults(response);
+			return results.map((entry: any) => toLangchainMessage(entry));
+		};
+
 		const memory = BufferWindowMemory
-			? new BufferWindowMemory({
+			? (() => {
+					class SearchFirstBufferMemory extends BufferWindowMemory {
+						private readonly retrieveFn: (values: any) => Promise<any[]>;
+
+						constructor(fields: any, retrieveFn: (values: any) => Promise<any[]>) {
+							super(fields);
+							this.retrieveFn = retrieveFn;
+						}
+
+						async loadMemoryVariables(values: any): Promise<Record<string, any>> {
+							const messages = await this.retrieveFn(values);
+							return { [this.memoryKey]: messages };
+						}
+					}
+
+					return new SearchFirstBufferMemory({
 					memoryKey: 'chat_history',
 					chatHistory,
 					returnMessages: true,
 					inputKey: 'input',
 					outputKey: 'output',
-					k: contextWindowLength,
-			  })
+					k: topK,
+					}, searchMessages);
+			  })()
 			: {
 					memoryKey: 'chat_history',
 					chatHistory,
 					returnMessages: true,
 					inputKey: 'input',
 					outputKey: 'output',
-					async loadMemoryVariables() {
-						return { chat_history: await chatHistory.getMessages() };
+					async loadMemoryVariables(values: any) {
+						return { chat_history: await searchMessages(values) };
 					},
 					async saveContext(inputValues: any, outputValues: any) {
 						const userInput = String(
