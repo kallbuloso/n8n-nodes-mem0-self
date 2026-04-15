@@ -35,16 +35,30 @@ export async function mem0ApiRequest(
 	const credentials = await this.getCredentials('mem0SelfHostedApi');
 	const baseUrl = (credentials.baseUrl as string).replace(/\/$/, '');
 	const resolvedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+	const methodUpper = method.toUpperCase();
+	const hasBody = body && Object.keys(body).length > 0 && !['GET', 'DELETE'].includes(methodUpper);
 
 	const options: IHttpRequestOptions = {
-		method: method as IHttpRequestOptions['method'],
-		body,
+		method: methodUpper as IHttpRequestOptions['method'],
 		qs,
 		url: `${baseUrl}${resolvedEndpoint}`,
+		json: true,
 	};
+	if (hasBody) {
+		options.body = body;
+	}
+
+	const headers: Record<string, string> = {};
+	if (hasBody) {
+		headers['Content-Type'] = 'application/json';
+	}
 
 	if (credentials.apiKey) {
-		options.headers = { 'X-API-Key': credentials.apiKey as string };
+		headers['X-API-Key'] = credentials.apiKey as string;
+	}
+
+	if (Object.keys(headers).length > 0) {
+		options.headers = headers;
 	}
 
 	try {
