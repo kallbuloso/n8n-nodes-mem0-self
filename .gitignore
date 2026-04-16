@@ -30,3 +30,5 @@ n8n-workflows-export.json
 # OS junk
 .DS_Store
 Thumbs.db
+
+docs/

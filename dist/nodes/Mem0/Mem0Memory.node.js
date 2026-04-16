@@ -218,6 +218,13 @@ class Mem0Memory {
                     description: 'Optional fields list for search response',
                 },
                 {
+                    displayName: 'Include Assistant Memories',
+                    name: 'includeAssistantMemories',
+                    type: 'boolean',
+                    default: false,
+                    description: 'Whether assistant messages should be included in retrieved context',
+                },
+                {
                     displayName: 'Infer on Store',
                     name: 'infer',
                     type: 'boolean',
@@ -237,6 +244,7 @@ class Mem0Memory {
         const defaultQuery = String(this.getNodeParameter('defaultQuery', itemIndex, '') || '').trim();
         const rerank = Boolean(this.getNodeParameter('rerank', itemIndex, false));
         const fieldsInput = String(this.getNodeParameter('fields', itemIndex, '') || '').trim();
+        const includeAssistantMemories = Boolean(this.getNodeParameter('includeAssistantMemories', itemIndex, false));
         if (!userId || !agentId) {
             throw new n8n_workflow_1.NodeOperationError(this.getNode(), 'User ID and Agent ID are required.');
         }
@@ -270,7 +278,42 @@ class Mem0Memory {
             }
             const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
             const results = (0, GenericFunctions_1.extractResults)(response);
-            return results.map((entry) => toLangchainMessage(entry));
+            const userOnlyOrAll = results.filter((entry) => {
+                if (includeAssistantMemories)
+                    return true;
+                const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
+                return role === 'user' || role === 'human';
+            });
+            const contentSanitized = userOnlyOrAll.filter((entry) => {
+                const text = toMessageContent(entry).trim();
+                if (!text)
+                    return false;
+                // Drop obvious non-memory placeholders.
+                if (text.includes('$input.first().json'))
+                    return false;
+                // Drop interrogative user utterances that usually pollute semantic recall for factual retrieval.
+                if (text.endsWith('?'))
+                    return false;
+                return true;
+            });
+            // De-duplicate by normalized content, keeping the newest instance.
+            const dedupMap = new Map();
+            contentSanitized.forEach((entry, index) => {
+                const key = toMessageContent(entry).trim().toLowerCase();
+                const ts = new Date(entry?.created_at || entry?.updated_at || 0).getTime() || 0;
+                const prev = dedupMap.get(key);
+                if (!prev || ts > prev.ts) {
+                    dedupMap.set(key, { entry, index, ts });
+                }
+            });
+            // Keep Mem0 search ranking as primary signal; recency only breaks ties.
+            const ordered = [...dedupMap.values()].sort((a, b) => {
+                if (a.index !== b.index)
+                    return a.index - b.index;
+                return b.ts - a.ts;
+            });
+            const finalResults = ordered.slice(0, topK).map((x) => x.entry);
+            return finalResults.map((entry) => toLangchainMessage(entry));
         };
         const memory = BufferWindowMemory
             ? (() => {

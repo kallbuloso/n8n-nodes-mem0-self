@@ -252,6 +252,13 @@ export class Mem0Memory implements INodeType {
 				description: 'Optional fields list for search response',
 			},
 			{
+				displayName: 'Include Assistant Memories',
+				name: 'includeAssistantMemories',
+				type: 'boolean',
+				default: false,
+				description: 'Whether assistant messages should be included in retrieved context',
+			},
+			{
 				displayName: 'Infer on Store',
 				name: 'infer',
 				type: 'boolean',
@@ -275,6 +282,9 @@ export class Mem0Memory implements INodeType {
 		const defaultQuery = String(this.getNodeParameter('defaultQuery', itemIndex, '') || '').trim();
 		const rerank = Boolean(this.getNodeParameter('rerank', itemIndex, false));
 		const fieldsInput = String(this.getNodeParameter('fields', itemIndex, '') || '').trim();
+		const includeAssistantMemories = Boolean(
+			this.getNodeParameter('includeAssistantMemories', itemIndex, false),
+		);
 
 		if (!userId || !agentId) {
 			throw new NodeOperationError(this.getNode(), 'User ID and Agent ID are required.');
@@ -319,7 +329,42 @@ export class Mem0Memory implements INodeType {
 
 			const response = await mem0ApiRequest.call(this, 'POST', '/search', body);
 			const results = extractResults(response);
-			return results.map((entry: any) => toLangchainMessage(entry));
+
+			const userOnlyOrAll = results.filter((entry: any) => {
+				if (includeAssistantMemories) return true;
+				const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
+				return role === 'user' || role === 'human';
+			});
+
+			const contentSanitized = userOnlyOrAll.filter((entry: any) => {
+				const text = toMessageContent(entry).trim();
+				if (!text) return false;
+				// Drop obvious non-memory placeholders.
+				if (text.includes('$input.first().json')) return false;
+				// Drop interrogative user utterances that usually pollute semantic recall for factual retrieval.
+				if (text.endsWith('?')) return false;
+				return true;
+			});
+
+			// De-duplicate by normalized content, keeping the newest instance.
+			const dedupMap = new Map<string, { entry: any; index: number; ts: number }>();
+			contentSanitized.forEach((entry: any, index: number) => {
+				const key = toMessageContent(entry).trim().toLowerCase();
+				const ts = new Date(entry?.created_at || entry?.updated_at || 0).getTime() || 0;
+				const prev = dedupMap.get(key);
+				if (!prev || ts > prev.ts) {
+					dedupMap.set(key, { entry, index, ts });
+				}
+			});
+
+			// Keep Mem0 search ranking as primary signal; recency only breaks ties.
+			const ordered = [...dedupMap.values()].sort((a, b) => {
+				if (a.index !== b.index) return a.index - b.index;
+				return b.ts - a.ts;
+			});
+
+			const finalResults = ordered.slice(0, topK).map((x) => x.entry);
+			return finalResults.map((entry: any) => toLangchainMessage(entry));
 		};
 
 		const memory = BufferWindowMemory
