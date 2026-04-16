@@ -96,6 +96,8 @@ class Mem0ChatHistory {
         this.ctx = ctx;
         this.scope = scope;
         this.maxMessageLength = options.maxMessageLength;
+        this.inferOnStore = options.inferOnStore;
+        this.storeStrategy = options.storeStrategy;
     }
     normalizeRole(message) {
         const role = String(message?.role || message?.type || message?._getType?.() || '').toLowerCase();
@@ -109,6 +111,9 @@ class Mem0ChatHistory {
         return String(message?.content ?? '');
     }
     async append(role, content) {
+        if (this.storeStrategy === 'facts_only' && role !== 'user') {
+            return;
+        }
         const normalized = String(content || '').trim();
         if (!normalized)
             return;
@@ -117,8 +122,13 @@ class Mem0ChatHistory {
         }
         await GenericFunctions_1.mem0ApiRequest.call(this.ctx, 'POST', '/memories', {
             messages: [{ role, content: normalized }],
-            infer: false,
-            metadata: { source: 'n8n_mem0_memory_safe', role },
+            infer: this.inferOnStore,
+            metadata: {
+                source: 'n8n_mem0_memory_safe',
+                role,
+                channel: 'chat',
+                memory_type: this.storeStrategy === 'facts_only' ? 'fact' : 'conversation',
+            },
             ...this.scope,
         });
     }
@@ -197,6 +207,38 @@ class Mem0Memory {
                     description: 'Maximum number of relevant memories to retrieve per query',
                 },
                 {
+                    displayName: 'Search Mode',
+                    name: 'searchMode',
+                    type: 'options',
+                    default: 'balanced',
+                    options: [
+                        {
+                            name: 'Balanced (Recommended)',
+                            value: 'balanced',
+                            description: 'Prioritizes user factual memories with safe fallbacks',
+                        },
+                        {
+                            name: 'Strict Facts',
+                            value: 'strict_facts',
+                            description: 'Prefers user factual memories only',
+                        },
+                        {
+                            name: 'Legacy',
+                            value: 'legacy',
+                            description: 'Previous compatibility behavior',
+                        },
+                    ],
+                    description: 'Retrieval strategy used for search results post-processing',
+                },
+                {
+                    displayName: 'Max Context Characters',
+                    name: 'maxContextChars',
+                    type: 'number',
+                    default: 700,
+                    typeOptions: { minValue: 100, maxValue: 8000 },
+                    description: 'Maximum total characters injected into AI context after retrieval',
+                },
+                {
                     displayName: 'Default Query',
                     name: 'defaultQuery',
                     type: 'string',
@@ -225,6 +267,39 @@ class Mem0Memory {
                     description: 'Whether assistant messages should be included in retrieved context',
                 },
                 {
+                    displayName: 'Store Strategy',
+                    name: 'storeStrategy',
+                    type: 'options',
+                    default: 'conversation',
+                    options: [
+                        {
+                            name: 'Conversation (Compatible)',
+                            value: 'conversation',
+                            description: 'Stores user and assistant turns',
+                        },
+                        {
+                            name: 'Facts Only',
+                            value: 'facts_only',
+                            description: 'Stores user factual signals and avoids assistant turn noise',
+                        },
+                    ],
+                    description: 'How messages are persisted into memory',
+                },
+                {
+                    displayName: 'Search Filters (JSON)',
+                    name: 'searchFilters',
+                    type: 'string',
+                    default: '',
+                    description: 'Optional JSON filters passed to Mem0 search payload',
+                },
+                {
+                    displayName: 'Allow Empty Context',
+                    name: 'allowEmptyContext',
+                    type: 'boolean',
+                    default: false,
+                    description: 'If disabled, retrieval automatically falls back before returning empty context',
+                },
+                {
                     displayName: 'Infer on Store',
                     name: 'infer',
                     type: 'boolean',
@@ -245,7 +320,13 @@ class Mem0Memory {
         const defaultQuery = String(this.getNodeParameter('defaultQuery', itemIndex, '') || '').trim();
         const rerank = Boolean(this.getNodeParameter('rerank', itemIndex, false));
         const fieldsInput = String(this.getNodeParameter('fields', itemIndex, '') || '').trim();
+        const searchMode = String(this.getNodeParameter('searchMode', itemIndex, 'balanced') || 'balanced');
+        const maxContextChars = Math.max(100, Math.floor(Number(this.getNodeParameter('maxContextChars', itemIndex, 700) || 700)));
         const includeAssistantMemories = Boolean(this.getNodeParameter('includeAssistantMemories', itemIndex, false));
+        const storeStrategy = String(this.getNodeParameter('storeStrategy', itemIndex, 'conversation') || 'conversation');
+        const searchFiltersInput = String(this.getNodeParameter('searchFilters', itemIndex, '') || '').trim();
+        const allowEmptyContext = Boolean(this.getNodeParameter('allowEmptyContext', itemIndex, false));
+        const inferOnStore = Boolean(this.getNodeParameter('infer', itemIndex, false));
         if (!userId || !agentId) {
             throw new n8n_workflow_1.NodeOperationError(this.getNode(), 'User ID and Agent ID are required.');
         }
@@ -257,6 +338,8 @@ class Mem0Memory {
             scope.run_id = runId;
         const chatHistory = new Mem0ChatHistory(this, scope, {
             maxMessageLength: MAX_MESSAGE_LENGTH,
+            inferOnStore,
+            storeStrategy,
         });
         const searchMessages = async (values) => {
             const rawQuery = String(values?.input ||
@@ -277,6 +360,15 @@ class Mem0Memory {
                     .map((field) => field.trim())
                     .filter((field) => field.length > 0)
                 : undefined;
+            let searchFilters;
+            if (searchFiltersInput) {
+                try {
+                    searchFilters = JSON.parse(searchFiltersInput);
+                }
+                catch {
+                    throw new n8n_workflow_1.NodeOperationError(this.getNode(), 'Search Filters (JSON) is not valid JSON.');
+                }
+            }
             const scopeCandidates = [];
             // 1) Most strict
             scopeCandidates.push({ ...scope });
@@ -290,6 +382,8 @@ class Mem0Memory {
                 user_id: scope.user_id,
             });
             let results = [];
+            let filteredAttempt = Boolean(searchFilters && Object.keys(searchFilters).length > 0);
+            const strictFactsMode = searchMode === 'strict_facts';
             for (const scopeCandidate of scopeCandidates) {
                 const body = {
                     query: effectiveQuery,
@@ -299,12 +393,43 @@ class Mem0Memory {
                 };
                 if (fields)
                     body.fields = fields;
+                if (searchFilters)
+                    body.filters = searchFilters;
+                if (strictFactsMode && !searchFilters) {
+                    body.filters = {
+                        AND: [{ role: 'user' }, { memory_type: 'fact' }],
+                    };
+                    filteredAttempt = true;
+                }
                 const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
                 results = (0, GenericFunctions_1.extractResults)(response);
                 if (results.length > 0)
                     break;
             }
+            // Fallback: if strict/filtered attempt returned nothing, retry without filters on the same cascade.
+            if (!allowEmptyContext && results.length === 0 && filteredAttempt) {
+                for (const scopeCandidate of scopeCandidates) {
+                    const body = {
+                        query: effectiveQuery,
+                        top_k: topK,
+                        rerank,
+                        ...scopeCandidate,
+                    };
+                    if (fields)
+                        body.fields = fields;
+                    const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
+                    results = (0, GenericFunctions_1.extractResults)(response);
+                    if (results.length > 0)
+                        break;
+                }
+            }
             const userOnlyOrAll = results.filter((entry) => {
+                if (searchMode === 'legacy' && includeAssistantMemories)
+                    return true;
+                if (searchMode === 'legacy' && !includeAssistantMemories) {
+                    const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
+                    return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai';
+                }
                 if (includeAssistantMemories)
                     return true;
                 const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
@@ -340,7 +465,32 @@ class Mem0Memory {
                     return a.index - b.index;
                 return b.ts - a.ts;
             });
-            const finalResults = ordered.slice(0, topK).map((x) => x.entry);
+            const topKEntries = ordered.slice(0, topK).map((x) => x.entry);
+            let charBudget = maxContextChars;
+            const finalResults = [];
+            for (const entry of topKEntries) {
+                const content = toMessageContent(entry);
+                if (!content)
+                    continue;
+                const nextCost = content.length;
+                if (finalResults.length > 0 && nextCost > charBudget)
+                    continue;
+                if (nextCost > charBudget && finalResults.length === 0) {
+                    finalResults.push({
+                        ...entry,
+                        memory: content.slice(0, charBudget),
+                    });
+                    charBudget = 0;
+                    break;
+                }
+                finalResults.push(entry);
+                charBudget -= nextCost;
+                if (charBudget <= 0)
+                    break;
+            }
+            if (!allowEmptyContext && finalResults.length === 0 && results.length > 0) {
+                finalResults.push(results[0]);
+            }
             return finalResults.map((entry) => toLangchainMessage(entry));
         };
         const memory = BufferWindowMemory
