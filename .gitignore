@@ -26,6 +26,8 @@ e2e-*.json
 n8n-nodes-export.json
 n8n-credentials-export.json
 n8n-workflows-export.json
+workflows/*
+examples/
 
 # OS junk
 .DS_Store
