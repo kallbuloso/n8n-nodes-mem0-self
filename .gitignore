@@ -1,6 +1,7 @@
 # Dependencies
 node_modules/
 .npmrc
+.npmignore
 
 # Build/cache/temp (local)
 .npm-cache/
@@ -36,4 +37,7 @@ Thumbs.db
 docs/
 AGENTS.md
 n8nac-config.json
-.npmignore
+test-integration.js
+test-mem0-memory.js
+TEST_REPORT.md
+RELEASE_NOTES.md

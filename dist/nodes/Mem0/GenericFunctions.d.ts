@@ -3,7 +3,7 @@ type Ctx = IExecuteFunctions | IHookFunctions | ILoadOptionsFunctions | ISupplyD
 /**
  * Extracts the memories array from an API response.
  * Self-hosted usually returns arrays directly, but can also wrap results in
- * { results: [...], relations: [...] }.
+ * { results: [...], relations: [...] } or nested structures like { data: { results: [...] } }.
  */
 export declare function extractResults(res: any): any[];
 /**

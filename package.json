@@ -1,7 +1,7 @@
 {
 	"name": "n8n-nodes-mem0-self",
-	"version": "0.2.10",
-	"description": "n8n community node for Mem0 Self-Hosted REST API",
+	"version": "0.2.11",
+	"description": "n8n community node for Mem0 Self-Hosted with LangChain-compliant AI memory",
 	"license": "MIT",
 	"author": {
 		"name": "Amaral Karl"
@@ -39,6 +39,13 @@
 		"vector-database",
 		"ai-agent",
 		"agent-id",
+		"langchain",
+		"self-hosted",
+		"n8n",
+		"mem0",
+		"memory",
+		"ai-agent",
+		"ai-memory",
 		"langchain",
 		"self-hosted"
 	],

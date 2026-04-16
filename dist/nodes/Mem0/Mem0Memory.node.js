@@ -79,11 +79,18 @@ function toMessageContent(memory) {
 function toLangchainMessage(memory) {
     const content = toMessageContent(memory);
     const role = String(memory?.metadata?.role || memory?.role || '').toLowerCase();
+    // Ensure message has full LangChain structure
+    const createMsg = (MsgClass) => {
+        const msg = new MsgClass(content);
+        msg.additional_kwargs = memory?.additional_kwargs || {};
+        msg.response_metadata = memory?.response_metadata || {};
+        return msg;
+    };
     if (role === 'user' || role === 'human')
-        return new HumanMessage(content);
+        return createMsg(HumanMessage);
     if (role === 'assistant' || role === 'ai')
-        return new AIMessage(content);
-    return new SystemMessage(content);
+        return createMsg(AIMessage);
+    return createMsg(SystemMessage);
 }
 function wrapMemoryResponse(memory, ctx) {
     if (typeof logWrapper === 'function') {
@@ -433,10 +440,11 @@ class Mem0Memory {
                 .sort((a, b) => {
                 const aTs = new Date(a?.created_at || a?.updated_at || 0).getTime() || 0;
                 const bTs = new Date(b?.created_at || b?.updated_at || 0).getTime() || 0;
-                return aTs - bTs;
+                return bTs - aTs; // descendente: mais recentes primeiro
             });
             const maxMessages = bufferLimit * 2;
-            return normalized.slice(-maxMessages).map((entry) => toLangchainMessage(entry));
+            // Pega os N mais recentes e reverte para ordem cronológica
+            return normalized.slice(0, maxMessages).reverse().map((entry) => toLangchainMessage(entry));
         };
         const shouldFallbackToSearch = (values, bufferMessages) => {
             if (!fallbackToSearchOnBufferMiss)
@@ -692,7 +700,12 @@ class Mem0Memory {
                     return;
                 },
             };
-        return { response: wrapMemoryResponse(memory, this) };
+        // Return memory with correct LangChain key structure
+        const wrappedMemory = wrapMemoryResponse(memory, this);
+        if (wrappedMemory && typeof wrappedMemory === 'object') {
+            wrappedMemory.memoryKey = wrappedMemory.memoryKey || 'chat_history';
+        }
+        return { response: wrappedMemory };
     }
     async execute() {
         const items = this.getInputData();

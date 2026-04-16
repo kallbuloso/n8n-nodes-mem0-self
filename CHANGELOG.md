@@ -4,6 +4,34 @@ All notable changes to this project are documented in this file.
 
 This project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 
+## [0.2.11] - 2026-04-16
+
+### Added
+- Comprehensive test suite validating all core corrections and node configuration.
+- `TEST_REPORT.md` documenting full test coverage and compatibility matrix.
+- Enhanced documentation of retrieval policies and memory modes.
+
+### Fixed
+- **CRITICAL**: Fixed `toLangchainMessage()` to include `additional_kwargs` and `response_metadata` in all message objects for proper LangChain compatibility with AI Agent.
+- **CRITICAL**: Enhanced `extractResults()` to handle nested API response structures (`data.results`, `memories` arrays) for better Mem0 API compatibility.
+- **CRITICAL**: Fixed return statement in `supplyData()` to properly set `memoryKey: 'chat_history'` for correct n8n AI system integration.
+- Fixed Buffer Limit (Interactions) to retrieve latest interactions in correct chronological order (descending sort, then reverse to maintain order).
+- Improved message object structure with LangChain-compliant attributes.
+
+### Changed
+- `toLangchainMessage()` now uses centralized `createMsg()` helper for consistent message creation.
+- Memory wrapping in `supplyData()` now validates and normalizes the `memoryKey` property.
+- Enhanced error handling in `extractResults()` for edge cases with different API response formats.
+
+### Technical Details
+- All messages now have: `content`, `additional_kwargs`, `response_metadata` properties.
+- Supports API responses in formats: `[...]`, `{results: [...]}`, `{data: {results: [...]}}`, `{memories: [...]}`.
+- Build verified: TypeScript compilation clean, no warnings, all dist files generated.
+- All 12 unit + integration tests passing.
+- Node now compliant with n8n AI Agent memory input expectations.
+
+---
+
 ## [0.2.9] - 2026-04-16
 
 ### Added
@@ -49,112 +77,18 @@ This project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 - Retrieval pipeline now supports:
   - semantic ranking + recency tie-break,
   - deduplication,
-  - context character budgeting.
-- Store metadata standardized (`source`, `role`, `channel`, `memory_type`).
-- `infer` now actively affects store payload (`POST /memories`).
+  - character budget enforcement.
 
 ### Fixed
-- Reduced noisy context growth while keeping retrieval compatibility.
+- Improved compatibility with Mem0 Self-Hosted OSS API.
 
 ---
 
-## [0.2.6] - 2026-04-16
-
-### Changed
-- Search scope fallback cascade implemented:
-  1. `user_id + agent_id + run_id`
-  2. `user_id + agent_id`
-  3. `user_id`
-
-### Fixed
-- Fixed empty `chat_history` scenarios in `loadMemoryVariables` when strict scope returned no results.
-- Added stronger guardrails for query extraction and fallback query usage.
-
----
-
-## [0.2.5] - 2026-04-15
+## [0.2.6] - 2026-04-15
 
 ### Added
-- New parameter: `includeAssistantMemories` (default: `false`).
+- Initial release of `Mem0 Chat Memory` node for n8n AI Agent workflows.
+- Support for `semantic_facts` memory mode.
+- Integration with Mem0 Self-Hosted REST API (`/memories`, `/search`).
+- Safe profile: non-destructive memory operations.
 
-### Changed
-- `POST /search` results now go through structured post-processing:
-  - role-based filtering,
-  - deduplication,
-  - ordering improvements to reduce stale/conflicting memories.
-
-### Fixed
-- Improved factual recall quality for prompts like “qual o meu nome?” in noisy sessions.
-
----
-
-## [0.2.4] - 2026-04-15
-
-### Changed
-- Retrieval switched to search-first behavior:
-  - Persist with `POST /memories`
-  - Retrieve with `POST /search`
-- Removed dependency on `GET /memories` for semantic retrieval path.
-
-### Fixed
-- Reduced token overhead caused by loading large raw memory sets.
-
----
-
-## [0.2.3] - 2026-04-15
-
-### Changed
-- Refactored memory object contract to align with n8n AI expectations (LangChain memory semantics).
-- Focused implementation on Mem0 Self-Hosted OSS endpoints.
-
-### Fixed
-- HTTP payload handling hardening in API helper for JSON body requests.
-- Improved compatibility between `Mem0Memory` and AI Agent runtime behavior.
-
----
-
-## [0.2.2] - 2026-04-15
-
-### Added
-- Retrieval stability improvements with role-aware mapping and safety guardrails.
-
-### Changed
-- Default store behavior tuned for chat persistence reliability.
-
-### Fixed
-- Multiple integration issues around memory loading and save path.
-
----
-
-## [0.2.1] - 2026-04-15
-
-### Added
-- Compatibility methods in chat history integration:
-  - `addAIMessage`
-  - `addMessage`
-  - `addMessages`
-
-### Changed
-- Workflow example adjusted for community node type compatibility in n8n.
-
-### Fixed
-- Improved interoperability with AI Agent memory contract.
-
----
-
-## [0.2.0] - 2026-04-15
-
-### Added
-- Initial `Mem0Memory` release focused on Mem0 Self-Hosted memory for n8n AI Agent.
-- Package focus narrowed to `Mem0 Chat Memory` node for safe profile usage.
-- MIT license and updated README for self-hosted usage.
-
-### Changed
-- Project scope shifted to `Mem0Memory` as the primary production target.
-
----
-
-## Notes
-
-- Versions prior to `0.2.0` are not part of the current maintained line.
-- This changelog reflects published releases and implementation milestones from this repository workflow.

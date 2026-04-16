@@ -12,11 +12,14 @@ type Ctx = IExecuteFunctions | IHookFunctions | ILoadOptionsFunctions | ISupplyD
 /**
  * Extracts the memories array from an API response.
  * Self-hosted usually returns arrays directly, but can also wrap results in
- * { results: [...], relations: [...] }.
+ * { results: [...], relations: [...] } or nested structures like { data: { results: [...] } }.
  */
 export function extractResults(res: any): any[] {
 	if (Array.isArray(res)) return res;
+	// Handle nested { data: { results: [...] } }
+	if (res?.data?.results && Array.isArray(res.data.results)) return res.data.results;
 	if (res?.results && Array.isArray(res.results)) return res.results;
+	if (res?.memories && Array.isArray(res.memories)) return res.memories;
 	if (res) return [res];
 	return [];
 }

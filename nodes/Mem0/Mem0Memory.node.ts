@@ -92,9 +92,18 @@ function toMessageContent(memory: any): string {
 function toLangchainMessage(memory: any): any {
 	const content = toMessageContent(memory);
 	const role = String(memory?.metadata?.role || memory?.role || '').toLowerCase();
-	if (role === 'user' || role === 'human') return new HumanMessage(content);
-	if (role === 'assistant' || role === 'ai') return new AIMessage(content);
-	return new SystemMessage(content);
+
+	// Ensure message has full LangChain structure
+	const createMsg = (MsgClass: any) => {
+		const msg = new MsgClass(content);
+		msg.additional_kwargs = memory?.additional_kwargs || {};
+		msg.response_metadata = memory?.response_metadata || {};
+		return msg;
+	};
+
+	if (role === 'user' || role === 'human') return createMsg(HumanMessage);
+	if (role === 'assistant' || role === 'ai') return createMsg(AIMessage);
+	return createMsg(SystemMessage);
 }
 
 function wrapMemoryResponse(memory: any, ctx: ISupplyDataFunctions): any {
@@ -778,7 +787,12 @@ export class Mem0Memory implements INodeType {
 					},
 			  };
 
-		return { response: wrapMemoryResponse(memory, this) };
+  // Return memory with correct LangChain key structure
+  const wrappedMemory = wrapMemoryResponse(memory, this);
+  if (wrappedMemory && typeof wrappedMemory === 'object') {
+    wrappedMemory.memoryKey = wrappedMemory.memoryKey || 'chat_history';
+  }
+  return { response: wrappedMemory };
 	}
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
