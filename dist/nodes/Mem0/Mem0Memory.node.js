@@ -237,6 +237,7 @@ class Mem0Memory {
     async supplyData(itemIndex) {
         const MAX_MESSAGE_LENGTH = 10000;
         const MAX_QUERY_LENGTH = 2000;
+        const FALLBACK_QUERY = 'user profile, preferences, and important facts';
         const userId = String(this.getNodeParameter('userId', itemIndex, '') || '').trim();
         const agentId = String(this.getNodeParameter('agentId', itemIndex, '') || '').trim();
         const runId = String(this.getNodeParameter('runId', itemIndex, '') || '').trim();
@@ -258,33 +259,59 @@ class Mem0Memory {
             maxMessageLength: MAX_MESSAGE_LENGTH,
         });
         const searchMessages = async (values) => {
-            const rawQuery = String(values?.input || values?.query || values?.human_input || values?.chatInput || defaultQuery || '').trim();
-            if (!rawQuery)
-                return [];
-            if (rawQuery.length > MAX_QUERY_LENGTH) {
+            const rawQuery = String(values?.input ||
+                values?.query ||
+                values?.human_input ||
+                values?.chatInput ||
+                values?.text ||
+                values?.message ||
+                defaultQuery ||
+                '').trim();
+            const effectiveQuery = rawQuery || FALLBACK_QUERY;
+            if (effectiveQuery.length > MAX_QUERY_LENGTH) {
                 throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Search query is too long. Maximum supported length is ${MAX_QUERY_LENGTH} characters.`);
             }
-            const body = {
-                query: rawQuery,
-                top_k: topK,
-                rerank,
-                ...scope,
-            };
-            if (fieldsInput) {
-                body.fields = fieldsInput
+            const fields = fieldsInput
+                ? fieldsInput
                     .split(',')
                     .map((field) => field.trim())
-                    .filter((field) => field.length > 0);
+                    .filter((field) => field.length > 0)
+                : undefined;
+            const scopeCandidates = [];
+            // 1) Most strict
+            scopeCandidates.push({ ...scope });
+            // 2) Relax run_id
+            scopeCandidates.push({
+                user_id: scope.user_id,
+                agent_id: scope.agent_id,
+            });
+            // 3) User-only fallback
+            scopeCandidates.push({
+                user_id: scope.user_id,
+            });
+            let results = [];
+            for (const scopeCandidate of scopeCandidates) {
+                const body = {
+                    query: effectiveQuery,
+                    top_k: topK,
+                    rerank,
+                    ...scopeCandidate,
+                };
+                if (fields)
+                    body.fields = fields;
+                const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
+                results = (0, GenericFunctions_1.extractResults)(response);
+                if (results.length > 0)
+                    break;
             }
-            const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
-            const results = (0, GenericFunctions_1.extractResults)(response);
             const userOnlyOrAll = results.filter((entry) => {
                 if (includeAssistantMemories)
                     return true;
                 const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
                 return role === 'user' || role === 'human';
             });
-            const contentSanitized = userOnlyOrAll.filter((entry) => {
+            const roleFiltered = userOnlyOrAll.length > 0 ? userOnlyOrAll : results;
+            const contentSanitized = roleFiltered.filter((entry) => {
                 const text = toMessageContent(entry).trim();
                 if (!text)
                     return false;
@@ -296,9 +323,10 @@ class Mem0Memory {
                     return false;
                 return true;
             });
+            const sanitized = contentSanitized.length > 0 ? contentSanitized : roleFiltered;
             // De-duplicate by normalized content, keeping the newest instance.
             const dedupMap = new Map();
-            contentSanitized.forEach((entry, index) => {
+            sanitized.forEach((entry, index) => {
                 const key = toMessageContent(entry).trim().toLowerCase();
                 const ts = new Date(entry?.created_at || entry?.updated_at || 0).getTime() || 0;
                 const prev = dedupMap.get(key);

@@ -271,6 +271,7 @@ export class Mem0Memory implements INodeType {
 	async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
 		const MAX_MESSAGE_LENGTH = 10000;
 		const MAX_QUERY_LENGTH = 2000;
+		const FALLBACK_QUERY = 'user profile, preferences, and important facts';
 
 		const userId = String(this.getNodeParameter('userId', itemIndex, '') || '').trim();
 		const agentId = String(this.getNodeParameter('agentId', itemIndex, '') || '').trim();
@@ -302,41 +303,67 @@ export class Mem0Memory implements INodeType {
 
 		const searchMessages = async (values: any): Promise<any[]> => {
 			const rawQuery = String(
-				values?.input || values?.query || values?.human_input || values?.chatInput || defaultQuery || '',
+				values?.input ||
+				values?.query ||
+				values?.human_input ||
+				values?.chatInput ||
+				values?.text ||
+				values?.message ||
+				defaultQuery ||
+				'',
 			).trim();
 
-			if (!rawQuery) return [];
-			if (rawQuery.length > MAX_QUERY_LENGTH) {
+			const effectiveQuery = rawQuery || FALLBACK_QUERY;
+			if (effectiveQuery.length > MAX_QUERY_LENGTH) {
 				throw new NodeOperationError(
 					this.getNode(),
 					`Search query is too long. Maximum supported length is ${MAX_QUERY_LENGTH} characters.`,
 				);
 			}
 
-			const body: Record<string, unknown> = {
-				query: rawQuery,
-				top_k: topK,
-				rerank,
-				...scope,
-			};
+			const fields = fieldsInput
+				? fieldsInput
+						.split(',')
+						.map((field) => field.trim())
+						.filter((field) => field.length > 0)
+				: undefined;
 
-			if (fieldsInput) {
-				body.fields = fieldsInput
-					.split(',')
-					.map((field) => field.trim())
-					.filter((field) => field.length > 0);
+			const scopeCandidates: Array<Record<string, unknown>> = [];
+			// 1) Most strict
+			scopeCandidates.push({ ...scope });
+			// 2) Relax run_id
+			scopeCandidates.push({
+				user_id: scope.user_id,
+				agent_id: scope.agent_id,
+			});
+			// 3) User-only fallback
+			scopeCandidates.push({
+				user_id: scope.user_id,
+			});
+
+			let results: any[] = [];
+			for (const scopeCandidate of scopeCandidates) {
+				const body: Record<string, unknown> = {
+					query: effectiveQuery,
+					top_k: topK,
+					rerank,
+					...scopeCandidate,
+				};
+				if (fields) body.fields = fields;
+
+				const response = await mem0ApiRequest.call(this, 'POST', '/search', body);
+				results = extractResults(response);
+				if (results.length > 0) break;
 			}
-
-			const response = await mem0ApiRequest.call(this, 'POST', '/search', body);
-			const results = extractResults(response);
 
 			const userOnlyOrAll = results.filter((entry: any) => {
 				if (includeAssistantMemories) return true;
 				const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
 				return role === 'user' || role === 'human';
 			});
+			const roleFiltered = userOnlyOrAll.length > 0 ? userOnlyOrAll : results;
 
-			const contentSanitized = userOnlyOrAll.filter((entry: any) => {
+			const contentSanitized = roleFiltered.filter((entry: any) => {
 				const text = toMessageContent(entry).trim();
 				if (!text) return false;
 				// Drop obvious non-memory placeholders.
@@ -345,10 +372,11 @@ export class Mem0Memory implements INodeType {
 				if (text.endsWith('?')) return false;
 				return true;
 			});
+			const sanitized = contentSanitized.length > 0 ? contentSanitized : roleFiltered;
 
 			// De-duplicate by normalized content, keeping the newest instance.
 			const dedupMap = new Map<string, { entry: any; index: number; ts: number }>();
-			contentSanitized.forEach((entry: any, index: number) => {
+			sanitized.forEach((entry: any, index: number) => {
 				const key = toMessageContent(entry).trim().toLowerCase();
 				const ts = new Date(entry?.created_at || entry?.updated_at || 0).getTime() || 0;
 				const prev = dedupMap.get(key);
