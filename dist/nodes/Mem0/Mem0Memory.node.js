@@ -207,6 +207,50 @@ class Mem0Memory {
                     description: 'Maximum number of relevant memories to retrieve per query',
                 },
                 {
+                    displayName: 'Memory Mode',
+                    name: 'memoryMode',
+                    type: 'options',
+                    default: 'semantic_facts',
+                    options: [
+                        {
+                            name: 'Semantic Facts',
+                            value: 'semantic_facts',
+                            description: 'Retrieves relevant facts via semantic search',
+                        },
+                        {
+                            name: 'Conversation Pairs',
+                            value: 'conversation_pairs',
+                            description: 'Loads chronological human + AI conversation turns',
+                        },
+                    ],
+                    description: 'Memory retrieval strategy for AI Agent context',
+                },
+                {
+                    displayName: 'Buffer Limit (Interactions)',
+                    name: 'bufferLimit',
+                    type: 'number',
+                    default: 20,
+                    typeOptions: { minValue: 1, maxValue: 200 },
+                    description: 'How many latest user+assistant interactions to include in conversation mode',
+                    displayOptions: {
+                        show: {
+                            memoryMode: ['conversation_pairs'],
+                        },
+                    },
+                },
+                {
+                    displayName: 'Fallback to Search on Buffer Miss',
+                    name: 'fallbackToSearchOnBufferMiss',
+                    type: 'boolean',
+                    default: true,
+                    description: 'When the buffer appears unrelated to the current query, fallback to Mem0 semantic search',
+                    displayOptions: {
+                        show: {
+                            memoryMode: ['conversation_pairs'],
+                        },
+                    },
+                },
+                {
                     displayName: 'Search Mode',
                     name: 'searchMode',
                     type: 'options',
@@ -317,6 +361,8 @@ class Mem0Memory {
         const agentId = String(this.getNodeParameter('agentId', itemIndex, '') || '').trim();
         const runId = String(this.getNodeParameter('runId', itemIndex, '') || '').trim();
         const topK = Math.min(50, Math.max(1, Math.floor(Number(this.getNodeParameter('topK', itemIndex, 10) || 10))));
+        const memoryMode = String(this.getNodeParameter('memoryMode', itemIndex, 'semantic_facts') || 'semantic_facts');
+        const bufferLimit = Math.max(1, Math.floor(Number(this.getNodeParameter('bufferLimit', itemIndex, 20) || 20)));
         const defaultQuery = String(this.getNodeParameter('defaultQuery', itemIndex, '') || '').trim();
         const rerank = Boolean(this.getNodeParameter('rerank', itemIndex, false));
         const fieldsInput = String(this.getNodeParameter('fields', itemIndex, '') || '').trim();
@@ -324,6 +370,7 @@ class Mem0Memory {
         const maxContextChars = Math.max(100, Math.floor(Number(this.getNodeParameter('maxContextChars', itemIndex, 700) || 700)));
         const includeAssistantMemories = Boolean(this.getNodeParameter('includeAssistantMemories', itemIndex, false));
         const storeStrategy = String(this.getNodeParameter('storeStrategy', itemIndex, 'conversation') || 'conversation');
+        const fallbackToSearchOnBufferMiss = Boolean(this.getNodeParameter('fallbackToSearchOnBufferMiss', itemIndex, true));
         const searchFiltersInput = String(this.getNodeParameter('searchFilters', itemIndex, '') || '').trim();
         const allowEmptyContext = Boolean(this.getNodeParameter('allowEmptyContext', itemIndex, false));
         const inferOnStore = Boolean(this.getNodeParameter('infer', itemIndex, false));
@@ -341,6 +388,49 @@ class Mem0Memory {
             inferOnStore,
             storeStrategy,
         });
+        const loadConversationMessages = async () => {
+            // Conversation buffer is intentionally strict-scoped to avoid bringing all historical chats.
+            const strictScope = runId
+                ? { user_id: scope.user_id, agent_id: scope.agent_id, run_id: scope.run_id }
+                : { user_id: scope.user_id, agent_id: scope.agent_id };
+            const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'GET', '/memories', {}, strictScope);
+            const results = (0, GenericFunctions_1.extractResults)(response);
+            const normalized = results
+                .filter((entry) => {
+                const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
+                return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai';
+            })
+                .sort((a, b) => {
+                const aTs = new Date(a?.created_at || a?.updated_at || 0).getTime() || 0;
+                const bTs = new Date(b?.created_at || b?.updated_at || 0).getTime() || 0;
+                return aTs - bTs;
+            });
+            const maxMessages = bufferLimit * 2;
+            return normalized.slice(-maxMessages).map((entry) => toLangchainMessage(entry));
+        };
+        const shouldFallbackToSearch = (values, bufferMessages) => {
+            if (!fallbackToSearchOnBufferMiss)
+                return false;
+            if (bufferMessages.length === 0)
+                return true;
+            const query = String(values?.input || values?.query || values?.human_input || values?.chatInput || values?.text || values?.message || '')
+                .trim()
+                .toLowerCase();
+            if (!query)
+                return false;
+            const bufferText = bufferMessages
+                .map((m) => String(m?.content || ''))
+                .join(' ')
+                .toLowerCase();
+            const tokens = query
+                .split(/[^a-z0-9áàâãéêíóôõúçñ]+/i)
+                .map((t) => t.trim())
+                .filter((t) => t.length >= 3);
+            if (tokens.length === 0)
+                return false;
+            const matched = tokens.some((t) => bufferText.includes(t));
+            return !matched;
+        };
         const searchMessages = async (values) => {
             const rawQuery = String(values?.input ||
                 values?.query ||
@@ -501,7 +591,16 @@ class Mem0Memory {
                         this.retrieveFn = retrieveFn;
                     }
                     async loadMemoryVariables(values) {
-                        const messages = await this.retrieveFn(values);
+                        let messages;
+                        if (memoryMode === 'conversation_pairs') {
+                            const bufferMessages = await loadConversationMessages();
+                            messages = shouldFallbackToSearch(values, bufferMessages)
+                                ? await this.retrieveFn(values)
+                                : bufferMessages;
+                        }
+                        else {
+                            messages = await this.retrieveFn(values);
+                        }
                         return { [this.memoryKey]: messages };
                     }
                 }
@@ -521,6 +620,14 @@ class Mem0Memory {
                 inputKey: 'input',
                 outputKey: 'output',
                 async loadMemoryVariables(values) {
+                    if (memoryMode === 'conversation_pairs') {
+                        const bufferMessages = await loadConversationMessages();
+                        return {
+                            chat_history: shouldFallbackToSearch(values, bufferMessages)
+                                ? await searchMessages(values)
+                                : bufferMessages,
+                        };
+                    }
                     return { chat_history: await searchMessages(values) };
                 },
                 async saveContext(inputValues, outputValues) {

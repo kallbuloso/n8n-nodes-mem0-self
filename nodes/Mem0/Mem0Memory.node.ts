@@ -112,13 +112,17 @@ type Mem0Scope = {
 
 class Mem0ChatHistory {
 	private readonly maxMessageLength: number;
+	private readonly inferOnStore: boolean;
+	private readonly storeStrategy: 'conversation' | 'facts_only';
 
 	constructor(
 		private readonly ctx: ISupplyDataFunctions,
 		private readonly scope: Mem0Scope,
-		options: { maxMessageLength: number },
+		options: { maxMessageLength: number; inferOnStore: boolean; storeStrategy: 'conversation' | 'facts_only' },
 	) {
 		this.maxMessageLength = options.maxMessageLength;
+		this.inferOnStore = options.inferOnStore;
+		this.storeStrategy = options.storeStrategy;
 	}
 
 	private normalizeRole(message: any): 'user' | 'assistant' {
@@ -133,6 +137,10 @@ class Mem0ChatHistory {
 	}
 
 	private async append(role: 'user' | 'assistant', content: string): Promise<void> {
+		if (this.storeStrategy === 'facts_only' && role !== 'user') {
+			return;
+		}
+
 		const normalized = String(content || '').trim();
 		if (!normalized) return;
 		if (normalized.length > this.maxMessageLength) {
@@ -144,8 +152,13 @@ class Mem0ChatHistory {
 
 		await mem0ApiRequest.call(this.ctx, 'POST', '/memories', {
 			messages: [{ role, content: normalized }],
-			infer: false,
-			metadata: { source: 'n8n_mem0_memory_safe', role },
+			infer: this.inferOnStore,
+			metadata: {
+				source: 'n8n_mem0_memory_safe',
+				role,
+				channel: 'chat',
+				memory_type: this.storeStrategy === 'facts_only' ? 'fact' : 'conversation',
+			},
 			...this.scope,
 		});
 	}
@@ -231,6 +244,82 @@ export class Mem0Memory implements INodeType {
 				description: 'Maximum number of relevant memories to retrieve per query',
 			},
 			{
+				displayName: 'Memory Mode',
+				name: 'memoryMode',
+				type: 'options',
+				default: 'semantic_facts',
+				options: [
+					{
+						name: 'Semantic Facts',
+						value: 'semantic_facts',
+						description: 'Retrieves relevant facts via semantic search',
+					},
+					{
+						name: 'Conversation Pairs',
+						value: 'conversation_pairs',
+						description: 'Loads chronological human + AI conversation turns',
+					},
+				],
+				description: 'Memory retrieval strategy for AI Agent context',
+			},
+			{
+				displayName: 'Buffer Limit (Interactions)',
+				name: 'bufferLimit',
+				type: 'number',
+				default: 20,
+				typeOptions: { minValue: 1, maxValue: 200 },
+				description: 'How many latest user+assistant interactions to include in conversation mode',
+				displayOptions: {
+					show: {
+						memoryMode: ['conversation_pairs'],
+					},
+				},
+			},
+			{
+				displayName: 'Fallback to Search on Buffer Miss',
+				name: 'fallbackToSearchOnBufferMiss',
+				type: 'boolean',
+				default: true,
+				description: 'When the buffer appears unrelated to the current query, fallback to Mem0 semantic search',
+				displayOptions: {
+					show: {
+						memoryMode: ['conversation_pairs'],
+					},
+				},
+			},
+			{
+				displayName: 'Search Mode',
+				name: 'searchMode',
+				type: 'options',
+				default: 'balanced',
+				options: [
+					{
+						name: 'Balanced (Recommended)',
+						value: 'balanced',
+						description: 'Prioritizes user factual memories with safe fallbacks',
+					},
+					{
+						name: 'Strict Facts',
+						value: 'strict_facts',
+						description: 'Prefers user factual memories only',
+					},
+					{
+						name: 'Legacy',
+						value: 'legacy',
+						description: 'Previous compatibility behavior',
+					},
+				],
+				description: 'Retrieval strategy used for search results post-processing',
+			},
+			{
+				displayName: 'Max Context Characters',
+				name: 'maxContextChars',
+				type: 'number',
+				default: 700,
+				typeOptions: { minValue: 100, maxValue: 8000 },
+				description: 'Maximum total characters injected into AI context after retrieval',
+			},
+			{
 				displayName: 'Default Query',
 				name: 'defaultQuery',
 				type: 'string',
@@ -259,6 +348,39 @@ export class Mem0Memory implements INodeType {
 				description: 'Whether assistant messages should be included in retrieved context',
 			},
 			{
+				displayName: 'Store Strategy',
+				name: 'storeStrategy',
+				type: 'options',
+				default: 'conversation',
+				options: [
+					{
+						name: 'Conversation (Compatible)',
+						value: 'conversation',
+						description: 'Stores user and assistant turns',
+					},
+					{
+						name: 'Facts Only',
+						value: 'facts_only',
+						description: 'Stores user factual signals and avoids assistant turn noise',
+					},
+				],
+				description: 'How messages are persisted into memory',
+			},
+			{
+				displayName: 'Search Filters (JSON)',
+				name: 'searchFilters',
+				type: 'string',
+				default: '',
+				description: 'Optional JSON filters passed to Mem0 search payload',
+			},
+			{
+				displayName: 'Allow Empty Context',
+				name: 'allowEmptyContext',
+				type: 'boolean',
+				default: false,
+				description: 'If disabled, retrieval automatically falls back before returning empty context',
+			},
+			{
 				displayName: 'Infer on Store',
 				name: 'infer',
 				type: 'boolean',
@@ -280,12 +402,36 @@ export class Mem0Memory implements INodeType {
 			50,
 			Math.max(1, Math.floor(Number(this.getNodeParameter('topK', itemIndex, 10) || 10))),
 		);
+		const memoryMode = String(this.getNodeParameter('memoryMode', itemIndex, 'semantic_facts') || 'semantic_facts') as
+			| 'semantic_facts'
+			| 'conversation_pairs';
+		const bufferLimit = Math.max(
+			1,
+			Math.floor(Number(this.getNodeParameter('bufferLimit', itemIndex, 20) || 20)),
+		);
 		const defaultQuery = String(this.getNodeParameter('defaultQuery', itemIndex, '') || '').trim();
 		const rerank = Boolean(this.getNodeParameter('rerank', itemIndex, false));
 		const fieldsInput = String(this.getNodeParameter('fields', itemIndex, '') || '').trim();
+		const searchMode = String(this.getNodeParameter('searchMode', itemIndex, 'balanced') || 'balanced') as
+			| 'balanced'
+			| 'strict_facts'
+			| 'legacy';
+		const maxContextChars = Math.max(
+			100,
+			Math.floor(Number(this.getNodeParameter('maxContextChars', itemIndex, 700) || 700)),
+		);
 		const includeAssistantMemories = Boolean(
 			this.getNodeParameter('includeAssistantMemories', itemIndex, false),
 		);
+		const storeStrategy = String(
+			this.getNodeParameter('storeStrategy', itemIndex, 'conversation') || 'conversation',
+		) as 'conversation' | 'facts_only';
+		const fallbackToSearchOnBufferMiss = Boolean(
+			this.getNodeParameter('fallbackToSearchOnBufferMiss', itemIndex, true),
+		);
+		const searchFiltersInput = String(this.getNodeParameter('searchFilters', itemIndex, '') || '').trim();
+		const allowEmptyContext = Boolean(this.getNodeParameter('allowEmptyContext', itemIndex, false));
+		const inferOnStore = Boolean(this.getNodeParameter('infer', itemIndex, false));
 
 		if (!userId || !agentId) {
 			throw new NodeOperationError(this.getNode(), 'User ID and Agent ID are required.');
@@ -299,7 +445,58 @@ export class Mem0Memory implements INodeType {
 
 		const chatHistory = new Mem0ChatHistory(this, scope, {
 			maxMessageLength: MAX_MESSAGE_LENGTH,
+			inferOnStore,
+			storeStrategy,
 		});
+
+		const loadConversationMessages = async (): Promise<any[]> => {
+			// Conversation buffer is intentionally strict-scoped to avoid bringing all historical chats.
+			const strictScope: Record<string, unknown> = runId
+				? { user_id: scope.user_id, agent_id: scope.agent_id, run_id: scope.run_id }
+				: { user_id: scope.user_id, agent_id: scope.agent_id };
+
+			const response = await mem0ApiRequest.call(this, 'GET', '/memories', {}, strictScope);
+			const results = extractResults(response);
+
+			const normalized = results
+				.filter((entry: any) => {
+					const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
+					return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai';
+				})
+				.sort((a: any, b: any) => {
+					const aTs = new Date(a?.created_at || a?.updated_at || 0).getTime() || 0;
+					const bTs = new Date(b?.created_at || b?.updated_at || 0).getTime() || 0;
+					return aTs - bTs;
+				});
+
+			const maxMessages = bufferLimit * 2;
+			return normalized.slice(-maxMessages).map((entry: any) => toLangchainMessage(entry));
+		};
+
+		const shouldFallbackToSearch = (values: any, bufferMessages: any[]): boolean => {
+			if (!fallbackToSearchOnBufferMiss) return false;
+			if (bufferMessages.length === 0) return true;
+			const query = String(
+				values?.input || values?.query || values?.human_input || values?.chatInput || values?.text || values?.message || '',
+			)
+				.trim()
+				.toLowerCase();
+			if (!query) return false;
+
+			const bufferText = bufferMessages
+				.map((m: any) => String(m?.content || ''))
+				.join(' ')
+				.toLowerCase();
+
+			const tokens = query
+				.split(/[^a-z0-9áàâãéêíóôõúçñ]+/i)
+				.map((t) => t.trim())
+				.filter((t) => t.length >= 3);
+
+			if (tokens.length === 0) return false;
+			const matched = tokens.some((t) => bufferText.includes(t));
+			return !matched;
+		};
 
 		const searchMessages = async (values: any): Promise<any[]> => {
 			const rawQuery = String(
@@ -328,6 +525,15 @@ export class Mem0Memory implements INodeType {
 						.filter((field) => field.length > 0)
 				: undefined;
 
+			let searchFilters: Record<string, unknown> | undefined;
+			if (searchFiltersInput) {
+				try {
+					searchFilters = JSON.parse(searchFiltersInput);
+				} catch {
+					throw new NodeOperationError(this.getNode(), 'Search Filters (JSON) is not valid JSON.');
+				}
+			}
+
 			const scopeCandidates: Array<Record<string, unknown>> = [];
 			// 1) Most strict
 			scopeCandidates.push({ ...scope });
@@ -342,6 +548,8 @@ export class Mem0Memory implements INodeType {
 			});
 
 			let results: any[] = [];
+			let filteredAttempt = Boolean(searchFilters && Object.keys(searchFilters).length > 0);
+			const strictFactsMode = searchMode === 'strict_facts';
 			for (const scopeCandidate of scopeCandidates) {
 				const body: Record<string, unknown> = {
 					query: effectiveQuery,
@@ -350,13 +558,41 @@ export class Mem0Memory implements INodeType {
 					...scopeCandidate,
 				};
 				if (fields) body.fields = fields;
+				if (searchFilters) body.filters = searchFilters;
+				if (strictFactsMode && !searchFilters) {
+					body.filters = {
+						AND: [{ role: 'user' }, { memory_type: 'fact' }],
+					};
+					filteredAttempt = true;
+				}
 
 				const response = await mem0ApiRequest.call(this, 'POST', '/search', body);
 				results = extractResults(response);
 				if (results.length > 0) break;
 			}
 
+			// Fallback: if strict/filtered attempt returned nothing, retry without filters on the same cascade.
+			if (!allowEmptyContext && results.length === 0 && filteredAttempt) {
+				for (const scopeCandidate of scopeCandidates) {
+					const body: Record<string, unknown> = {
+						query: effectiveQuery,
+						top_k: topK,
+						rerank,
+						...scopeCandidate,
+					};
+					if (fields) body.fields = fields;
+					const response = await mem0ApiRequest.call(this, 'POST', '/search', body);
+					results = extractResults(response);
+					if (results.length > 0) break;
+				}
+			}
+
 			const userOnlyOrAll = results.filter((entry: any) => {
+				if (searchMode === 'legacy' && includeAssistantMemories) return true;
+				if (searchMode === 'legacy' && !includeAssistantMemories) {
+					const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
+					return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai';
+				}
 				if (includeAssistantMemories) return true;
 				const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
 				return role === 'user' || role === 'human';
@@ -391,7 +627,31 @@ export class Mem0Memory implements INodeType {
 				return b.ts - a.ts;
 			});
 
-			const finalResults = ordered.slice(0, topK).map((x) => x.entry);
+			const topKEntries = ordered.slice(0, topK).map((x) => x.entry);
+			let charBudget = maxContextChars;
+			const finalResults: any[] = [];
+			for (const entry of topKEntries) {
+				const content = toMessageContent(entry);
+				if (!content) continue;
+				const nextCost = content.length;
+				if (finalResults.length > 0 && nextCost > charBudget) continue;
+				if (nextCost > charBudget && finalResults.length === 0) {
+					finalResults.push({
+						...entry,
+						memory: content.slice(0, charBudget),
+					});
+					charBudget = 0;
+					break;
+				}
+				finalResults.push(entry);
+				charBudget -= nextCost;
+				if (charBudget <= 0) break;
+			}
+
+			if (!allowEmptyContext && finalResults.length === 0 && results.length > 0) {
+				finalResults.push(results[0]);
+			}
+
 			return finalResults.map((entry: any) => toLangchainMessage(entry));
 		};
 
@@ -406,7 +666,15 @@ export class Mem0Memory implements INodeType {
 						}
 
 						async loadMemoryVariables(values: any): Promise<Record<string, any>> {
-							const messages = await this.retrieveFn(values);
+							let messages: any[];
+							if (memoryMode === 'conversation_pairs') {
+								const bufferMessages = await loadConversationMessages();
+								messages = shouldFallbackToSearch(values, bufferMessages)
+									? await this.retrieveFn(values)
+									: bufferMessages;
+							} else {
+								messages = await this.retrieveFn(values);
+							}
 							return { [this.memoryKey]: messages };
 						}
 					}
@@ -427,6 +695,14 @@ export class Mem0Memory implements INodeType {
 					inputKey: 'input',
 					outputKey: 'output',
 					async loadMemoryVariables(values: any) {
+						if (memoryMode === 'conversation_pairs') {
+							const bufferMessages = await loadConversationMessages();
+							return {
+								chat_history: shouldFallbackToSearch(values, bufferMessages)
+									? await searchMessages(values)
+									: bufferMessages,
+							};
+						}
 						return { chat_history: await searchMessages(values) };
 					},
 					async saveContext(inputValues: any, outputValues: any) {
