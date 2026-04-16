@@ -32,3 +32,6 @@ n8n-workflows-export.json
 Thumbs.db
 
 docs/
+AGENTS.md
+n8nac-config.json
+.npmignore

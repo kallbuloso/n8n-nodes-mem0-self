@@ -1,4 +1,4 @@
-import type {
+﻿import type {
 	IExecuteFunctions,
 	INodeExecutionData,
 	INodeType,
@@ -288,6 +288,35 @@ export class Mem0Memory implements INodeType {
 				},
 			},
 			{
+				displayName: 'Conversation Retrieval Policy',
+				name: 'conversationRetrievalPolicy',
+				type: 'options',
+				default: 'smart_fallback',
+				options: [
+					{
+						name: 'Smart Fallback (Recommended)',
+						value: 'smart_fallback',
+						description: 'Uses buffer first, then falls back to search when relevance is low',
+					},
+					{
+						name: 'Search First',
+						value: 'search_first',
+						description: 'Always retrieves with semantic search first, then falls back to buffer if empty',
+					},
+					{
+						name: 'Buffer First',
+						value: 'buffer_first',
+						description: 'Always uses recent buffer only',
+					},
+				],
+				description: 'How conversation mode chooses between buffer and semantic retrieval',
+				displayOptions: {
+					show: {
+						memoryMode: ['conversation_pairs'],
+					},
+				},
+			},
+			{
 				displayName: 'Search Mode',
 				name: 'searchMode',
 				type: 'options',
@@ -429,6 +458,9 @@ export class Mem0Memory implements INodeType {
 		const fallbackToSearchOnBufferMiss = Boolean(
 			this.getNodeParameter('fallbackToSearchOnBufferMiss', itemIndex, true),
 		);
+		const conversationRetrievalPolicy = String(
+			this.getNodeParameter('conversationRetrievalPolicy', itemIndex, 'smart_fallback') || 'smart_fallback',
+		) as 'smart_fallback' | 'search_first' | 'buffer_first';
 		const searchFiltersInput = String(this.getNodeParameter('searchFilters', itemIndex, '') || '').trim();
 		const allowEmptyContext = Boolean(this.getNodeParameter('allowEmptyContext', itemIndex, false));
 		const inferOnStore = Boolean(this.getNodeParameter('infer', itemIndex, false));
@@ -466,11 +498,12 @@ export class Mem0Memory implements INodeType {
 				.sort((a: any, b: any) => {
 					const aTs = new Date(a?.created_at || a?.updated_at || 0).getTime() || 0;
 					const bTs = new Date(b?.created_at || b?.updated_at || 0).getTime() || 0;
-					return aTs - bTs;
+					return bTs - aTs; // descendente: mais recentes primeiro
 				});
 
 			const maxMessages = bufferLimit * 2;
-			return normalized.slice(-maxMessages).map((entry: any) => toLangchainMessage(entry));
+			// Pega os N mais recentes e reverte para ordem cronológica
+			return normalized.slice(0, maxMessages).reverse().map((entry: any) => toLangchainMessage(entry));
 		};
 
 		const shouldFallbackToSearch = (values: any, bufferMessages: any[]): boolean => {
@@ -488,14 +521,27 @@ export class Mem0Memory implements INodeType {
 				.join(' ')
 				.toLowerCase();
 
+			const stopwords = new Set([
+				'a', 'an', 'and', 'are', 'as', 'at', 'do', 'for', 'from', 'how', 'i', 'in', 'is', 'it',
+				'me', 'my', 'of', 'on', 'or', 'the', 'to', 'was', 'what', 'where', 'who',
+				'com', 'como', 'da', 'de', 'do', 'e', 'ele', 'ela', 'em', 'eu', 'isso', 'meu', 'minha',
+				'na', 'no', 'o', 'os', 'para', 'por', 'qual', 'que', 'se', 'uma', 'um',
+				'yo', 'mi', 'donde', 'el', 'la', 'los', 'las', 'un', 'una',
+			]);
+
 			const tokens = query
-				.split(/[^a-z0-9áàâãéêíóôõúçñ]+/i)
+				.split(/[^a-z0-9]+/i)
 				.map((t) => t.trim())
-				.filter((t) => t.length >= 3);
+				.filter((t) => t.length >= 3 && !stopwords.has(t));
 
 			if (tokens.length === 0) return false;
-			const matched = tokens.some((t) => bufferText.includes(t));
-			return !matched;
+			const matchedCount = tokens.filter((t) => bufferText.includes(t)).length;
+			const coverage = matchedCount / tokens.length;
+
+			if (matchedCount === 0) return true;
+			if (tokens.length >= 3 && coverage < 0.6) return true;
+			if (tokens.length >= 5 && matchedCount < 2) return true;
+			return false;
 		};
 
 		const searchMessages = async (values: any): Promise<any[]> => {
@@ -559,12 +605,6 @@ export class Mem0Memory implements INodeType {
 				};
 				if (fields) body.fields = fields;
 				if (searchFilters) body.filters = searchFilters;
-				if (strictFactsMode && !searchFilters) {
-					body.filters = {
-						AND: [{ role: 'user' }, { memory_type: 'fact' }],
-					};
-					filteredAttempt = true;
-				}
 
 				const response = await mem0ApiRequest.call(this, 'POST', '/search', body);
 				results = extractResults(response);
@@ -587,7 +627,16 @@ export class Mem0Memory implements INodeType {
 				}
 			}
 
-			const userOnlyOrAll = results.filter((entry: any) => {
+			const strictFactsLocallyFiltered = strictFactsMode
+				? results.filter((entry: any) => {
+						const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
+						const memoryType = String(entry?.metadata?.memory_type || '').toLowerCase();
+						return role === 'user' || role === 'human' || memoryType === 'fact';
+				  })
+				: results;
+			const strictBaseResults = strictFactsLocallyFiltered.length > 0 ? strictFactsLocallyFiltered : results;
+
+			const userOnlyOrAll = strictBaseResults.filter((entry: any) => {
 				if (searchMode === 'legacy' && includeAssistantMemories) return true;
 				if (searchMode === 'legacy' && !includeAssistantMemories) {
 					const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
@@ -604,8 +653,6 @@ export class Mem0Memory implements INodeType {
 				if (!text) return false;
 				// Drop obvious non-memory placeholders.
 				if (text.includes('$input.first().json')) return false;
-				// Drop interrogative user utterances that usually pollute semantic recall for factual retrieval.
-				if (text.endsWith('?')) return false;
 				return true;
 			});
 			const sanitized = contentSanitized.length > 0 ? contentSanitized : roleFiltered;
@@ -655,6 +702,23 @@ export class Mem0Memory implements INodeType {
 			return finalResults.map((entry: any) => toLangchainMessage(entry));
 		};
 
+		const resolveConversationMessages = async (
+			values: any,
+			retrieveFn: (inputValues: any) => Promise<any[]>,
+		): Promise<any[]> => {
+			const bufferMessages = await loadConversationMessages();
+			if (conversationRetrievalPolicy === 'buffer_first') {
+				return bufferMessages;
+			}
+			if (conversationRetrievalPolicy === 'search_first') {
+				const searchResults = await retrieveFn(values);
+				return searchResults.length > 0 ? searchResults : bufferMessages;
+			}
+			return shouldFallbackToSearch(values, bufferMessages)
+				? await retrieveFn(values)
+				: bufferMessages;
+		};
+
 		const memory = BufferWindowMemory
 			? (() => {
 					class SearchFirstBufferMemory extends BufferWindowMemory {
@@ -668,10 +732,7 @@ export class Mem0Memory implements INodeType {
 						async loadMemoryVariables(values: any): Promise<Record<string, any>> {
 							let messages: any[];
 							if (memoryMode === 'conversation_pairs') {
-								const bufferMessages = await loadConversationMessages();
-								messages = shouldFallbackToSearch(values, bufferMessages)
-									? await this.retrieveFn(values)
-									: bufferMessages;
+								messages = await resolveConversationMessages(values, this.retrieveFn);
 							} else {
 								messages = await this.retrieveFn(values);
 							}
@@ -696,11 +757,8 @@ export class Mem0Memory implements INodeType {
 					outputKey: 'output',
 					async loadMemoryVariables(values: any) {
 						if (memoryMode === 'conversation_pairs') {
-							const bufferMessages = await loadConversationMessages();
 							return {
-								chat_history: shouldFallbackToSearch(values, bufferMessages)
-									? await searchMessages(values)
-									: bufferMessages,
+								chat_history: await resolveConversationMessages(values, searchMessages),
 							};
 						}
 						return { chat_history: await searchMessages(values) };
@@ -734,3 +792,4 @@ export class Mem0Memory implements INodeType {
 		];
 	}
 }
+

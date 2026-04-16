@@ -33,3 +33,5 @@ n8n-nodes-export.json
 n8n-credentials-export.json
 n8n-workflows-export.json
 *.map
+AGENTS.md
+n8nac-config.json

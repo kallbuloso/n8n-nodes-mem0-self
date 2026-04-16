@@ -251,6 +251,35 @@ class Mem0Memory {
                     },
                 },
                 {
+                    displayName: 'Conversation Retrieval Policy',
+                    name: 'conversationRetrievalPolicy',
+                    type: 'options',
+                    default: 'smart_fallback',
+                    options: [
+                        {
+                            name: 'Smart Fallback (Recommended)',
+                            value: 'smart_fallback',
+                            description: 'Uses buffer first, then falls back to search when relevance is low',
+                        },
+                        {
+                            name: 'Search First',
+                            value: 'search_first',
+                            description: 'Always retrieves with semantic search first, then falls back to buffer if empty',
+                        },
+                        {
+                            name: 'Buffer First',
+                            value: 'buffer_first',
+                            description: 'Always uses recent buffer only',
+                        },
+                    ],
+                    description: 'How conversation mode chooses between buffer and semantic retrieval',
+                    displayOptions: {
+                        show: {
+                            memoryMode: ['conversation_pairs'],
+                        },
+                    },
+                },
+                {
                     displayName: 'Search Mode',
                     name: 'searchMode',
                     type: 'options',
@@ -371,6 +400,7 @@ class Mem0Memory {
         const includeAssistantMemories = Boolean(this.getNodeParameter('includeAssistantMemories', itemIndex, false));
         const storeStrategy = String(this.getNodeParameter('storeStrategy', itemIndex, 'conversation') || 'conversation');
         const fallbackToSearchOnBufferMiss = Boolean(this.getNodeParameter('fallbackToSearchOnBufferMiss', itemIndex, true));
+        const conversationRetrievalPolicy = String(this.getNodeParameter('conversationRetrievalPolicy', itemIndex, 'smart_fallback') || 'smart_fallback');
         const searchFiltersInput = String(this.getNodeParameter('searchFilters', itemIndex, '') || '').trim();
         const allowEmptyContext = Boolean(this.getNodeParameter('allowEmptyContext', itemIndex, false));
         const inferOnStore = Boolean(this.getNodeParameter('infer', itemIndex, false));
@@ -422,14 +452,28 @@ class Mem0Memory {
                 .map((m) => String(m?.content || ''))
                 .join(' ')
                 .toLowerCase();
+            const stopwords = new Set([
+                'a', 'an', 'and', 'are', 'as', 'at', 'do', 'for', 'from', 'how', 'i', 'in', 'is', 'it',
+                'me', 'my', 'of', 'on', 'or', 'the', 'to', 'was', 'what', 'where', 'who',
+                'com', 'como', 'da', 'de', 'do', 'e', 'ele', 'ela', 'em', 'eu', 'isso', 'meu', 'minha',
+                'na', 'no', 'o', 'os', 'para', 'por', 'qual', 'que', 'se', 'uma', 'um',
+                'yo', 'mi', 'donde', 'el', 'la', 'los', 'las', 'un', 'una',
+            ]);
             const tokens = query
-                .split(/[^a-z0-9áàâãéêíóôõúçñ]+/i)
+                .split(/[^a-z0-9]+/i)
                 .map((t) => t.trim())
-                .filter((t) => t.length >= 3);
+                .filter((t) => t.length >= 3 && !stopwords.has(t));
             if (tokens.length === 0)
                 return false;
-            const matched = tokens.some((t) => bufferText.includes(t));
-            return !matched;
+            const matchedCount = tokens.filter((t) => bufferText.includes(t)).length;
+            const coverage = matchedCount / tokens.length;
+            if (matchedCount === 0)
+                return true;
+            if (tokens.length >= 3 && coverage < 0.6)
+                return true;
+            if (tokens.length >= 5 && matchedCount < 2)
+                return true;
+            return false;
         };
         const searchMessages = async (values) => {
             const rawQuery = String(values?.input ||
@@ -485,12 +529,6 @@ class Mem0Memory {
                     body.fields = fields;
                 if (searchFilters)
                     body.filters = searchFilters;
-                if (strictFactsMode && !searchFilters) {
-                    body.filters = {
-                        AND: [{ role: 'user' }, { memory_type: 'fact' }],
-                    };
-                    filteredAttempt = true;
-                }
                 const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
                 results = (0, GenericFunctions_1.extractResults)(response);
                 if (results.length > 0)
@@ -513,7 +551,15 @@ class Mem0Memory {
                         break;
                 }
             }
-            const userOnlyOrAll = results.filter((entry) => {
+            const strictFactsLocallyFiltered = strictFactsMode
+                ? results.filter((entry) => {
+                    const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
+                    const memoryType = String(entry?.metadata?.memory_type || '').toLowerCase();
+                    return role === 'user' || role === 'human' || memoryType === 'fact';
+                })
+                : results;
+            const strictBaseResults = strictFactsLocallyFiltered.length > 0 ? strictFactsLocallyFiltered : results;
+            const userOnlyOrAll = strictBaseResults.filter((entry) => {
                 if (searchMode === 'legacy' && includeAssistantMemories)
                     return true;
                 if (searchMode === 'legacy' && !includeAssistantMemories) {
@@ -532,9 +578,6 @@ class Mem0Memory {
                     return false;
                 // Drop obvious non-memory placeholders.
                 if (text.includes('$input.first().json'))
-                    return false;
-                // Drop interrogative user utterances that usually pollute semantic recall for factual retrieval.
-                if (text.endsWith('?'))
                     return false;
                 return true;
             });
@@ -583,6 +626,19 @@ class Mem0Memory {
             }
             return finalResults.map((entry) => toLangchainMessage(entry));
         };
+        const resolveConversationMessages = async (values, retrieveFn) => {
+            const bufferMessages = await loadConversationMessages();
+            if (conversationRetrievalPolicy === 'buffer_first') {
+                return bufferMessages;
+            }
+            if (conversationRetrievalPolicy === 'search_first') {
+                const searchResults = await retrieveFn(values);
+                return searchResults.length > 0 ? searchResults : bufferMessages;
+            }
+            return shouldFallbackToSearch(values, bufferMessages)
+                ? await retrieveFn(values)
+                : bufferMessages;
+        };
         const memory = BufferWindowMemory
             ? (() => {
                 class SearchFirstBufferMemory extends BufferWindowMemory {
@@ -593,10 +649,7 @@ class Mem0Memory {
                     async loadMemoryVariables(values) {
                         let messages;
                         if (memoryMode === 'conversation_pairs') {
-                            const bufferMessages = await loadConversationMessages();
-                            messages = shouldFallbackToSearch(values, bufferMessages)
-                                ? await this.retrieveFn(values)
-                                : bufferMessages;
+                            messages = await resolveConversationMessages(values, this.retrieveFn);
                         }
                         else {
                             messages = await this.retrieveFn(values);
@@ -621,11 +674,8 @@ class Mem0Memory {
                 outputKey: 'output',
                 async loadMemoryVariables(values) {
                     if (memoryMode === 'conversation_pairs') {
-                        const bufferMessages = await loadConversationMessages();
                         return {
-                            chat_history: shouldFallbackToSearch(values, bufferMessages)
-                                ? await searchMessages(values)
-                                : bufferMessages,
+                            chat_history: await resolveConversationMessages(values, searchMessages),
                         };
                     }
                     return { chat_history: await searchMessages(values) };
