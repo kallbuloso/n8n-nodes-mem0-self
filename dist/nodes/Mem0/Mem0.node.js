@@ -28,16 +28,16 @@ class Mem0 {
                             name: 'Store Interaction',
                             value: 'storeInteraction',
                             action: 'Store an interaction',
-                            description: 'Store user and assistant messages in a single POST /memories call',
+                            description: 'Store user and assistant messages in a single POST /memories call'
                         },
                         {
                             name: 'Search Conversation Context',
                             value: 'searchConversation',
                             action: 'Search conversation context',
-                            description: 'Search memories filtered by user_id and agent_id using POST /search',
-                        },
+                            description: 'Search memories filtered by user_id and agent_id using POST /search'
+                        }
                     ],
-                    default: 'storeInteraction',
+                    default: 'storeInteraction'
                 },
                 {
                     displayName: 'User ID',
@@ -45,7 +45,7 @@ class Mem0 {
                     type: 'string',
                     default: '',
                     required: true,
-                    description: 'User identifier (required)',
+                    description: 'User identifier (required)'
                 },
                 {
                     displayName: 'Agent ID',
@@ -53,7 +53,7 @@ class Mem0 {
                     type: 'string',
                     default: '',
                     required: true,
-                    description: 'Agent identifier (required)',
+                    description: 'Agent identifier (required)'
                 },
                 {
                     displayName: 'Run ID',
@@ -61,7 +61,7 @@ class Mem0 {
                     type: 'string',
                     default: '',
                     required: false,
-                    description: 'Optional session identifier',
+                    description: 'Optional session identifier'
                 },
                 {
                     displayName: 'User Message',
@@ -71,7 +71,7 @@ class Mem0 {
                     default: '',
                     required: true,
                     displayOptions: { show: { operation: ['storeInteraction'] } },
-                    description: 'User message to be stored',
+                    description: 'User message to be stored'
                 },
                 {
                     displayName: 'Assistant Message',
@@ -81,7 +81,7 @@ class Mem0 {
                     default: '',
                     required: true,
                     displayOptions: { show: { operation: ['storeInteraction'] } },
-                    description: 'Assistant message to be stored',
+                    description: 'Assistant message to be stored'
                 },
                 {
                     displayName: 'Infer',
@@ -89,7 +89,7 @@ class Mem0 {
                     type: 'boolean',
                     default: true,
                     displayOptions: { show: { operation: ['storeInteraction'] } },
-                    description: 'Enable Mem0 inference while storing',
+                    description: 'Enable Mem0 inference while storing'
                 },
                 {
                     displayName: 'Search Query',
@@ -98,7 +98,7 @@ class Mem0 {
                     default: '',
                     required: true,
                     displayOptions: { show: { operation: ['searchConversation'] } },
-                    description: 'Natural-language query for memory search',
+                    description: 'Natural-language query for memory search'
                 },
                 {
                     displayName: 'Top K',
@@ -107,7 +107,7 @@ class Mem0 {
                     default: 10,
                     typeOptions: { minValue: 1 },
                     displayOptions: { show: { operation: ['searchConversation'] } },
-                    description: 'Maximum number of memories to return',
+                    description: 'Maximum number of memories to return'
                 },
                 {
                     displayName: 'Rerank',
@@ -115,7 +115,7 @@ class Mem0 {
                     type: 'boolean',
                     default: false,
                     displayOptions: { show: { operation: ['searchConversation'] } },
-                    description: 'Enable reranking on search results',
+                    description: 'Enable reranking on search results'
                 },
                 {
                     displayName: 'Fields (Comma Separated)',
@@ -123,9 +123,9 @@ class Mem0 {
                     type: 'string',
                     default: '',
                     displayOptions: { show: { operation: ['searchConversation'] } },
-                    description: 'Optional list of response fields',
-                },
-            ],
+                    description: 'Optional list of response fields'
+                }
+            ]
         };
     }
     async execute() {
@@ -165,9 +165,9 @@ class Mem0 {
                         infer,
                         messages: [
                             { role: 'user', content: userMessage },
-                            { role: 'assistant', content: assistantMessage },
+                            { role: 'assistant', content: assistantMessage }
                         ],
-                        metadata: { source: 'n8n_safe_profile' },
+                        metadata: { source: 'n8n_safe_profile' }
                     };
                     if (runId)
                         body.run_id = runId;
@@ -179,8 +179,8 @@ class Mem0 {
                             user_id: userId,
                             agent_id: agentId,
                             run_id: runId || null,
-                            response,
-                        },
+                            response
+                        }
                     });
                     continue;
                 }
@@ -201,7 +201,7 @@ class Mem0 {
                         user_id: userId,
                         agent_id: agentId,
                         top_k: topK,
-                        rerank,
+                        rerank
                     };
                     if (runId)
                         body.run_id = runId;
@@ -225,8 +225,8 @@ class Mem0 {
                                     user_id: userId,
                                     agent_id: agentId,
                                     run_id: runId || null,
-                                    result: row,
-                                },
+                                    result: row
+                                }
                             });
                         }
                     }

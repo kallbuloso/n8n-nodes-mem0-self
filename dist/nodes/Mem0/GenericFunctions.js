@@ -36,7 +36,7 @@ async function mem0ApiRequest(method, endpoint, body = {}, qs = {}) {
         method: methodUpper,
         qs,
         url: `${baseUrl}${resolvedEndpoint}`,
-        json: true,
+        json: true
     };
     if (hasBody) {
         options.body = body;

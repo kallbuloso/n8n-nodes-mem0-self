@@ -13,7 +13,7 @@ class Mem0SelfHostedApi {
                 type: 'string',
                 default: 'http://localhost:8000',
                 required: true,
-                description: 'The base URL of your self-hosted Mem0 instance',
+                description: 'The base URL of your self-hosted Mem0 instance'
             },
             {
                 displayName: 'API Key',
@@ -21,23 +21,23 @@ class Mem0SelfHostedApi {
                 type: 'string',
                 typeOptions: { password: true },
                 default: '',
-                description: 'API key used in X-API-Key header',
-            },
+                description: 'API key used in X-API-Key header'
+            }
         ];
         this.authenticate = {
             type: 'generic',
             properties: {
                 headers: {
-                    'X-API-Key': '={{$credentials.apiKey}}',
-                },
-            },
+                    'X-API-Key': '={{$credentials.apiKey}}'
+                }
+            }
         };
         this.test = {
             request: {
                 baseURL: '={{$credentials.baseUrl}}',
                 url: '/docs',
-                method: 'GET',
-            },
+                method: 'GET'
+            }
         };
     }
 }

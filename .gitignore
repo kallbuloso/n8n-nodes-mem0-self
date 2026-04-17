@@ -17,6 +17,10 @@ pnpm-debug.log*
 .cursor/
 .claude/
 
+# Development scripts (temporary)
+*.py
+*.sh
+
 # BMAD/agent local scaffolding
 .agents/
 _bmad/
@@ -41,3 +45,10 @@ test-integration.js
 test-mem0-memory.js
 TEST_REPORT.md
 RELEASE_NOTES.md
+
+# Development scripts (temporary)
+*.py
+*.sh
+v*.md
+README_v*.md
+*_SUMMARY.md

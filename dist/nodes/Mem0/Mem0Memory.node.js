@@ -134,9 +134,9 @@ class Mem0ChatHistory {
                 source: 'n8n_mem0_memory_safe',
                 role,
                 channel: 'chat',
-                memory_type: this.storeStrategy === 'facts_only' ? 'fact' : 'conversation',
+                memory_type: this.storeStrategy === 'facts_only' ? 'fact' : 'conversation'
             },
-            ...this.scope,
+            ...this.scope
         });
     }
     async getMessages() {
@@ -188,7 +188,7 @@ class Mem0Memory {
                     type: 'string',
                     default: '',
                     required: true,
-                    description: 'Required memory owner user identifier',
+                    description: 'Required memory owner user identifier'
                 },
                 {
                     displayName: 'Agent ID',
@@ -196,14 +196,14 @@ class Mem0Memory {
                     type: 'string',
                     default: '',
                     required: true,
-                    description: 'Required memory owner agent identifier',
+                    description: 'Required memory owner agent identifier'
                 },
                 {
                     displayName: 'Run ID',
                     name: 'runId',
                     type: 'string',
                     default: '',
-                    description: 'Optional conversation/session identifier',
+                    description: 'Optional conversation/session identifier'
                 },
                 {
                     displayName: 'Top K',
@@ -211,26 +211,7 @@ class Mem0Memory {
                     type: 'number',
                     default: 10,
                     typeOptions: { minValue: 1, maxValue: 50 },
-                    description: 'Maximum number of relevant memories to retrieve per query',
-                },
-                {
-                    displayName: 'Memory Mode',
-                    name: 'memoryMode',
-                    type: 'options',
-                    default: 'semantic_facts',
-                    options: [
-                        {
-                            name: 'Semantic Facts',
-                            value: 'semantic_facts',
-                            description: 'Retrieves relevant facts via semantic search',
-                        },
-                        {
-                            name: 'Conversation Pairs',
-                            value: 'conversation_pairs',
-                            description: 'Loads chronological human + AI conversation turns',
-                        },
-                    ],
-                    description: 'Memory retrieval strategy for AI Agent context',
+                    description: 'Maximum number of relevant memories to retrieve per query'
                 },
                 {
                     displayName: 'Buffer Limit (Interactions)',
@@ -238,24 +219,14 @@ class Mem0Memory {
                     type: 'number',
                     default: 20,
                     typeOptions: { minValue: 1, maxValue: 200 },
-                    description: 'How many latest user+assistant interactions to include in conversation mode',
-                    displayOptions: {
-                        show: {
-                            memoryMode: ['conversation_pairs'],
-                        },
-                    },
+                    description: 'How many latest user+assistant interactions to include in conversation mode'
                 },
                 {
                     displayName: 'Fallback to Search on Buffer Miss',
                     name: 'fallbackToSearchOnBufferMiss',
                     type: 'boolean',
                     default: true,
-                    description: 'When the buffer appears unrelated to the current query, fallback to Mem0 semantic search',
-                    displayOptions: {
-                        show: {
-                            memoryMode: ['conversation_pairs'],
-                        },
-                    },
+                    description: 'When the buffer appears unrelated to the current query, fallback to Mem0 semantic search'
                 },
                 {
                     displayName: 'Conversation Retrieval Policy',
@@ -266,25 +237,20 @@ class Mem0Memory {
                         {
                             name: 'Smart Fallback (Recommended)',
                             value: 'smart_fallback',
-                            description: 'Uses buffer first, then falls back to search when relevance is low',
+                            description: 'Uses buffer first, then falls back to search when relevance is low'
                         },
                         {
                             name: 'Search First',
                             value: 'search_first',
-                            description: 'Always retrieves with semantic search first, then falls back to buffer if empty',
+                            description: 'Always retrieves with semantic search first, then falls back to buffer if empty'
                         },
                         {
                             name: 'Buffer First',
                             value: 'buffer_first',
-                            description: 'Always uses recent buffer only',
-                        },
+                            description: 'Always uses recent buffer only'
+                        }
                     ],
-                    description: 'How conversation mode chooses between buffer and semantic retrieval',
-                    displayOptions: {
-                        show: {
-                            memoryMode: ['conversation_pairs'],
-                        },
-                    },
+                    description: 'How conversation mode chooses between buffer and semantic retrieval'
                 },
                 {
                     displayName: 'Search Mode',
@@ -295,20 +261,20 @@ class Mem0Memory {
                         {
                             name: 'Balanced (Recommended)',
                             value: 'balanced',
-                            description: 'Prioritizes user factual memories with safe fallbacks',
+                            description: 'Prioritizes user factual memories with safe fallbacks'
                         },
                         {
                             name: 'Strict Facts',
                             value: 'strict_facts',
-                            description: 'Prefers user factual memories only',
+                            description: 'Prefers user factual memories only'
                         },
                         {
                             name: 'Legacy',
                             value: 'legacy',
-                            description: 'Previous compatibility behavior',
-                        },
+                            description: 'Previous compatibility behavior'
+                        }
                     ],
-                    description: 'Retrieval strategy used for search results post-processing',
+                    description: 'Retrieval strategy used for search results post-processing'
                 },
                 {
                     displayName: 'Max Context Characters',
@@ -316,35 +282,35 @@ class Mem0Memory {
                     type: 'number',
                     default: 700,
                     typeOptions: { minValue: 100, maxValue: 8000 },
-                    description: 'Maximum total characters injected into AI context after retrieval',
+                    description: 'Maximum total characters injected into AI context after retrieval'
                 },
                 {
                     displayName: 'Default Query',
                     name: 'defaultQuery',
                     type: 'string',
                     default: '',
-                    description: 'Fallback search query when no user input is available',
+                    description: 'Fallback search query when no user input is available'
                 },
                 {
                     displayName: 'Rerank',
                     name: 'rerank',
                     type: 'boolean',
                     default: false,
-                    description: 'Enable reranking in Mem0 search',
+                    description: 'Enable reranking in Mem0 search'
                 },
                 {
                     displayName: 'Fields (Comma Separated)',
                     name: 'fields',
                     type: 'string',
                     default: '',
-                    description: 'Optional fields list for search response',
+                    description: 'Optional fields list for search response'
                 },
                 {
                     displayName: 'Include Assistant Memories',
                     name: 'includeAssistantMemories',
                     type: 'boolean',
                     default: false,
-                    description: 'Whether assistant messages should be included in retrieved context',
+                    description: 'Whether assistant messages should be included in retrieved context'
                 },
                 {
                     displayName: 'Store Strategy',
@@ -355,38 +321,38 @@ class Mem0Memory {
                         {
                             name: 'Conversation (Compatible)',
                             value: 'conversation',
-                            description: 'Stores user and assistant turns',
+                            description: 'Stores user and assistant turns'
                         },
                         {
                             name: 'Facts Only',
                             value: 'facts_only',
-                            description: 'Stores user factual signals and avoids assistant turn noise',
-                        },
+                            description: 'Stores user factual signals and avoids assistant turn noise'
+                        }
                     ],
-                    description: 'How messages are persisted into memory',
+                    description: 'How messages are persisted into memory'
                 },
                 {
                     displayName: 'Search Filters (JSON)',
                     name: 'searchFilters',
                     type: 'string',
                     default: '',
-                    description: 'Optional JSON filters passed to Mem0 search payload',
+                    description: 'Optional JSON filters passed to Mem0 search payload'
                 },
                 {
                     displayName: 'Allow Empty Context',
                     name: 'allowEmptyContext',
                     type: 'boolean',
                     default: false,
-                    description: 'If disabled, retrieval automatically falls back before returning empty context',
+                    description: 'If disabled, retrieval automatically falls back before returning empty context'
                 },
                 {
                     displayName: 'Infer on Store',
                     name: 'infer',
                     type: 'boolean',
                     default: false,
-                    description: 'Legacy toggle kept for compatibility. Safe profile stores raw chat turns.',
-                },
-            ],
+                    description: 'Legacy toggle kept for compatibility. Safe profile stores raw chat turns.'
+                }
+            ]
         };
     }
     async supplyData(itemIndex) {
@@ -397,7 +363,7 @@ class Mem0Memory {
         const agentId = String(this.getNodeParameter('agentId', itemIndex, '') || '').trim();
         const runId = String(this.getNodeParameter('runId', itemIndex, '') || '').trim();
         const topK = Math.min(50, Math.max(1, Math.floor(Number(this.getNodeParameter('topK', itemIndex, 10) || 10))));
-        const memoryMode = String(this.getNodeParameter('memoryMode', itemIndex, 'semantic_facts') || 'semantic_facts');
+        const memoryMode = 'conversation_pairs';
         const bufferLimit = Math.max(1, Math.floor(Number(this.getNodeParameter('bufferLimit', itemIndex, 20) || 20)));
         const defaultQuery = String(this.getNodeParameter('defaultQuery', itemIndex, '') || '').trim();
         const rerank = Boolean(this.getNodeParameter('rerank', itemIndex, false));
@@ -416,14 +382,14 @@ class Mem0Memory {
         }
         const scope = {
             user_id: userId,
-            agent_id: agentId,
+            agent_id: agentId
         };
         if (runId)
             scope.run_id = runId;
         const chatHistory = new Mem0ChatHistory(this, scope, {
             maxMessageLength: MAX_MESSAGE_LENGTH,
             inferOnStore,
-            storeStrategy,
+            storeStrategy
         });
         const loadConversationMessages = async () => {
             // Conversation buffer is intentionally strict-scoped to avoid bringing all historical chats.
@@ -444,7 +410,10 @@ class Mem0Memory {
             });
             const maxMessages = bufferLimit * 2;
             // Pega os N mais recentes e reverte para ordem cronológica
-            return normalized.slice(0, maxMessages).reverse().map((entry) => toLangchainMessage(entry));
+            return normalized
+                .slice(0, maxMessages)
+                .reverse()
+                .map((entry) => toLangchainMessage(entry));
         };
         const shouldFallbackToSearch = (values, bufferMessages) => {
             if (!fallbackToSearchOnBufferMiss)
@@ -461,11 +430,64 @@ class Mem0Memory {
                 .join(' ')
                 .toLowerCase();
             const stopwords = new Set([
-                'a', 'an', 'and', 'are', 'as', 'at', 'do', 'for', 'from', 'how', 'i', 'in', 'is', 'it',
-                'me', 'my', 'of', 'on', 'or', 'the', 'to', 'was', 'what', 'where', 'who',
-                'com', 'como', 'da', 'de', 'do', 'e', 'ele', 'ela', 'em', 'eu', 'isso', 'meu', 'minha',
-                'na', 'no', 'o', 'os', 'para', 'por', 'qual', 'que', 'se', 'uma', 'um',
-                'yo', 'mi', 'donde', 'el', 'la', 'los', 'las', 'un', 'una',
+                'a',
+                'an',
+                'and',
+                'are',
+                'as',
+                'at',
+                'do',
+                'for',
+                'from',
+                'how',
+                'i',
+                'in',
+                'is',
+                'it',
+                'me',
+                'my',
+                'of',
+                'on',
+                'or',
+                'the',
+                'to',
+                'was',
+                'what',
+                'where',
+                'who',
+                'com',
+                'como',
+                'da',
+                'de',
+                'do',
+                'e',
+                'ele',
+                'ela',
+                'em',
+                'eu',
+                'isso',
+                'meu',
+                'minha',
+                'na',
+                'no',
+                'o',
+                'os',
+                'para',
+                'por',
+                'qual',
+                'que',
+                'se',
+                'uma',
+                'um',
+                'yo',
+                'mi',
+                'donde',
+                'el',
+                'la',
+                'los',
+                'las',
+                'un',
+                'una'
             ]);
             const tokens = query
                 .split(/[^a-z0-9]+/i)
@@ -484,14 +506,7 @@ class Mem0Memory {
             return false;
         };
         const searchMessages = async (values) => {
-            const rawQuery = String(values?.input ||
-                values?.query ||
-                values?.human_input ||
-                values?.chatInput ||
-                values?.text ||
-                values?.message ||
-                defaultQuery ||
-                '').trim();
+            const rawQuery = String(values?.input || values?.query || values?.human_input || values?.chatInput || values?.text || values?.message || defaultQuery || '').trim();
             const effectiveQuery = rawQuery || FALLBACK_QUERY;
             if (effectiveQuery.length > MAX_QUERY_LENGTH) {
                 throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Search query is too long. Maximum supported length is ${MAX_QUERY_LENGTH} characters.`);
@@ -517,11 +532,11 @@ class Mem0Memory {
             // 2) Relax run_id
             scopeCandidates.push({
                 user_id: scope.user_id,
-                agent_id: scope.agent_id,
+                agent_id: scope.agent_id
             });
             // 3) User-only fallback
             scopeCandidates.push({
-                user_id: scope.user_id,
+                user_id: scope.user_id
             });
             let results = [];
             let filteredAttempt = Boolean(searchFilters && Object.keys(searchFilters).length > 0);
@@ -531,7 +546,7 @@ class Mem0Memory {
                     query: effectiveQuery,
                     top_k: topK,
                     rerank,
-                    ...scopeCandidate,
+                    ...scopeCandidate
                 };
                 if (fields)
                     body.fields = fields;
@@ -549,7 +564,7 @@ class Mem0Memory {
                         query: effectiveQuery,
                         top_k: topK,
                         rerank,
-                        ...scopeCandidate,
+                        ...scopeCandidate
                     };
                     if (fields)
                         body.fields = fields;
@@ -619,7 +634,7 @@ class Mem0Memory {
                 if (nextCost > charBudget && finalResults.length === 0) {
                     finalResults.push({
                         ...entry,
-                        memory: content.slice(0, charBudget),
+                        memory: content.slice(0, charBudget)
                     });
                     charBudget = 0;
                     break;
@@ -643,9 +658,7 @@ class Mem0Memory {
                 const searchResults = await retrieveFn(values);
                 return searchResults.length > 0 ? searchResults : bufferMessages;
             }
-            return shouldFallbackToSearch(values, bufferMessages)
-                ? await retrieveFn(values)
-                : bufferMessages;
+            return shouldFallbackToSearch(values, bufferMessages) ? await retrieveFn(values) : bufferMessages;
         };
         const memory = BufferWindowMemory
             ? (() => {
@@ -656,12 +669,7 @@ class Mem0Memory {
                     }
                     async loadMemoryVariables(values) {
                         let messages;
-                        if (memoryMode === 'conversation_pairs') {
-                            messages = await resolveConversationMessages(values, this.retrieveFn);
-                        }
-                        else {
-                            messages = await this.retrieveFn(values);
-                        }
+                        messages = await resolveConversationMessages(values, this.retrieveFn);
                         return { [this.memoryKey]: messages };
                     }
                 }
@@ -671,7 +679,7 @@ class Mem0Memory {
                     returnMessages: true,
                     inputKey: 'input',
                     outputKey: 'output',
-                    k: topK,
+                    k: topK
                 }, searchMessages);
             })()
             : {
@@ -681,12 +689,9 @@ class Mem0Memory {
                 inputKey: 'input',
                 outputKey: 'output',
                 async loadMemoryVariables(values) {
-                    if (memoryMode === 'conversation_pairs') {
-                        return {
-                            chat_history: await resolveConversationMessages(values, searchMessages),
-                        };
-                    }
-                    return { chat_history: await searchMessages(values) };
+                    return {
+                        chat_history: await resolveConversationMessages(values, searchMessages)
+                    };
                 },
                 async saveContext(inputValues, outputValues) {
                     const userInput = String(inputValues?.input || inputValues?.query || inputValues?.human_input || inputValues?.chatInput || '').trim();
@@ -698,7 +703,7 @@ class Mem0Memory {
                 },
                 async clear() {
                     return;
-                },
+                }
             };
         // Return memory with correct LangChain key structure
         const wrappedMemory = wrapMemoryResponse(memory, this);
@@ -712,9 +717,9 @@ class Mem0Memory {
         return [
             items.map(() => ({
                 json: {
-                    message: 'Mem0 Chat Memory is ready. Connect "ai_memory" to AI Agent memory input.',
-                },
-            })),
+                    message: 'Mem0 Chat Memory is ready. Connect "ai_memory" to AI Agent memory input.'
+                }
+            }))
         ];
     }
 }
