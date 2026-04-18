@@ -1,6 +1,6 @@
 {
 	"name": "n8n-nodes-mem0-self",
-	"version": "0.2.12",
+	"version": "0.2.13",
 	"description": "n8n community node for Mem0 Self-Hosted with LangChain-compliant AI memory",
 	"license": "MIT",
 	"author": {

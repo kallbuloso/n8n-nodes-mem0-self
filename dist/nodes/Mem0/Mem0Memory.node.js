@@ -106,6 +106,68 @@ class Mem0ChatHistory {
         this.inferOnStore = options.inferOnStore;
         this.storeStrategy = options.storeStrategy;
     }
+    // ===== SLIDING WINDOW METHODS =====
+    /**
+     * Generate scope key from user_id + agent_id (global, no run_id)
+     * Used as Map key for cache isolation per user+agent combo
+     */
+    static getScopeKey(user_id, agent_id) {
+        return `${user_id}|${agent_id}`;
+    }
+    /**
+     * Record the last loaded index for this scope.
+     * Tracks progression through message history.
+     * @param user_id User identifier
+     * @param agent_id Agent identifier
+     * @param index Last message index loaded
+     */
+    static recordLastIndex(user_id, agent_id, index) {
+        const key = this.getScopeKey(user_id, agent_id);
+        this.lastSeenIndices.set(key, index);
+        this.scopeTimestamps.set(key, Date.now());
+    }
+    /**
+     * Get the last recorded index for this scope.
+     * Returns -1 if never loaded (first interaction).
+     * @param user_id User identifier
+     * @param agent_id Agent identifier
+     * @returns Last index or -1 if first time
+     */
+    static getLastIndex(user_id, agent_id) {
+        return this.lastSeenIndices.get(this.getScopeKey(user_id, agent_id)) ?? -1;
+    }
+    /**
+     * Cache messages for sliding window buffer.
+     * @param user_id User identifier
+     * @param agent_id Agent identifier
+     * @param messages Array of messages to cache
+     */
+    static cacheMessages(user_id, agent_id, messages) {
+        this.cachedMessages.set(this.getScopeKey(user_id, agent_id), messages);
+    }
+    /**
+     * Retrieve cached messages for this scope.
+     * Returns undefined if no cache exists.
+     * @param user_id User identifier
+     * @param agent_id Agent identifier
+     * @returns Cached messages or undefined
+     */
+    static getCachedMessages(user_id, agent_id) {
+        return this.cachedMessages.get(this.getScopeKey(user_id, agent_id));
+    }
+    /**
+     * Invalidate cache after saveContext().
+     * Forces fresh load on next interaction.
+     * Note: Does NOT delete lastSeenIndices to maintain progression tracking.
+     * @param user_id User identifier
+     * @param agent_id Agent identifier
+     */
+    static invalidateCache(user_id, agent_id) {
+        const key = this.getScopeKey(user_id, agent_id);
+        this.cachedMessages.delete(key);
+        // Keep lastSeenIndices for tracking progression
+    }
+    // ===== END SLIDING WINDOW METHODS =====
     normalizeRole(message) {
         const role = String(message?.role || message?.type || message?._getType?.() || '').toLowerCase();
         if (role === 'assistant' || role === 'ai')
@@ -167,6 +229,12 @@ class Mem0ChatHistory {
         return;
     }
 }
+// Sliding Window: Track last loaded index per scope (user_id|agent_id)
+Mem0ChatHistory.lastSeenIndices = new Map();
+// Sliding Window: Cache messages per scope (user_id|agent_id)
+Mem0ChatHistory.cachedMessages = new Map();
+// Sliding Window: Track timestamps for optional LRU cleanup (v0.2.14)
+Mem0ChatHistory.scopeTimestamps = new Map();
 class Mem0Memory {
     constructor() {
         this.description = {
@@ -392,28 +460,60 @@ class Mem0Memory {
             storeStrategy
         });
         const loadConversationMessages = async () => {
-            // Conversation buffer is intentionally strict-scoped to avoid bringing all historical chats.
-            const strictScope = runId
-                ? { user_id: scope.user_id, agent_id: scope.agent_id, run_id: scope.run_id }
-                : { user_id: scope.user_id, agent_id: scope.agent_id };
-            const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'GET', '/memories', {}, strictScope);
-            const results = (0, GenericFunctions_1.extractResults)(response);
-            const normalized = results
-                .filter((entry) => {
-                const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
-                return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai';
-            })
-                .sort((a, b) => {
-                const aTs = new Date(a?.created_at || a?.updated_at || 0).getTime() || 0;
-                const bTs = new Date(b?.created_at || b?.updated_at || 0).getTime() || 0;
-                return bTs - aTs; // descendente: mais recentes primeiro
-            });
+            // Sliding Window: Check if this is the first load
+            const lastIndex = Mem0ChatHistory.getLastIndex(scope.user_id, scope.agent_id);
             const maxMessages = bufferLimit * 2;
-            // Pega os N mais recentes e reverte para ordem cronológica
-            return normalized
-                .slice(0, maxMessages)
-                .reverse()
-                .map((entry) => toLangchainMessage(entry));
+            // ===== FIRST INTERACTION: Load full buffer =====
+            if (lastIndex === -1) {
+                // Conversation buffer is intentionally strict-scoped to avoid bringing all historical chats.
+                const strictScope = runId
+                    ? { user_id: scope.user_id, agent_id: scope.agent_id, run_id: scope.run_id }
+                    : { user_id: scope.user_id, agent_id: scope.agent_id };
+                const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'GET', '/memories', {}, strictScope);
+                const results = (0, GenericFunctions_1.extractResults)(response);
+                const normalized = results
+                    .filter((entry) => {
+                    const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
+                    return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai';
+                })
+                    .sort((a, b) => {
+                    const aTs = new Date(a?.created_at || a?.updated_at || 0).getTime() || 0;
+                    const bTs = new Date(b?.created_at || b?.updated_at || 0).getTime() || 0;
+                    return bTs - aTs; // descendente: mais recentes primeiro
+                })
+                    .slice(0, maxMessages);
+                // Record that we've loaded and cache for sliding window
+                Mem0ChatHistory.recordLastIndex(scope.user_id, scope.agent_id, maxMessages - 1);
+                Mem0ChatHistory.cacheMessages(scope.user_id, scope.agent_id, normalized);
+                // Return in chronological order
+                return normalized.reverse().map((entry) => toLangchainMessage(entry));
+            }
+            // ===== SUBSEQUENT INTERACTIONS: Sliding Window =====
+            const cachedMessages = Mem0ChatHistory.getCachedMessages(scope.user_id, scope.agent_id);
+            if (cachedMessages && cachedMessages.length > 0) {
+                // Remove oldest 2 interactions (slide window forward)
+                const slidingWindow = cachedMessages.slice(2);
+                // Fetch only the newest message to append
+                const strictScope = runId
+                    ? { user_id: scope.user_id, agent_id: scope.agent_id, run_id: scope.run_id }
+                    : { user_id: scope.user_id, agent_id: scope.agent_id };
+                const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'GET', '/memories', { limit: 1 }, strictScope);
+                const results = (0, GenericFunctions_1.extractResults)(response);
+                const filtered = results.filter((entry) => {
+                    const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
+                    return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai';
+                });
+                if (filtered.length > 0) {
+                    const newest = filtered[0];
+                    slidingWindow.push(newest);
+                    Mem0ChatHistory.recordLastIndex(scope.user_id, scope.agent_id, lastIndex + 1);
+                    Mem0ChatHistory.cacheMessages(scope.user_id, scope.agent_id, slidingWindow);
+                }
+                // Return in chronological order
+                return slidingWindow.reverse().map((entry) => toLangchainMessage(entry));
+            }
+            // Fallback: If cache is empty, do full reload
+            return loadConversationMessages();
         };
         const shouldFallbackToSearch = (values, bufferMessages) => {
             if (!fallbackToSearchOnBufferMiss)
@@ -700,6 +800,9 @@ class Mem0Memory {
                         await chatHistory.addUserMessage(userInput);
                     if (assistantOutput)
                         await chatHistory.addAIMessage(assistantOutput);
+                    // Phase 3: Invalidate cache after storing messages
+                    // Forces fresh load on next interaction to get the newest message
+                    Mem0ChatHistory.invalidateCache(scope.user_id, scope.agent_id);
                 },
                 async clear() {
                     return;
