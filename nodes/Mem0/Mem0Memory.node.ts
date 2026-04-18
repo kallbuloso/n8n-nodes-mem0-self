@@ -110,10 +110,52 @@ type Mem0Scope = {
   run_id?: string
 }
 
+type ConversationCacheEntry = {
+  ts: number
+  entries: any[]
+}
+
 class Mem0ChatHistory {
   private readonly maxMessageLength: number
   private readonly inferOnStore: boolean
   private readonly storeStrategy: 'conversation' | 'facts_only'
+  private static readonly CONVERSATION_CACHE_TTL_MS = 120000
+  private static readonly conversationCache = new Map<string, ConversationCacheEntry>()
+
+  static getScopedCacheKey(scope: Mem0Scope, maxMessages: number): string {
+    return `strict|${scope.user_id}|${scope.agent_id}|${scope.run_id || ''}|${maxMessages}`
+  }
+
+  static getGlobalCacheKey(userId: string, agentId: string, maxMessages: number): string {
+    return `global|${userId}|${agentId}|${maxMessages}`
+  }
+
+  static getConversationCache(key: string): any[] | null {
+    const entry = this.conversationCache.get(key)
+    if (!entry) return null
+    if (Date.now() - entry.ts > this.CONVERSATION_CACHE_TTL_MS) {
+      this.conversationCache.delete(key)
+      return null
+    }
+    return entry.entries
+  }
+
+  static setConversationCache(key: string, entries: any[]): void {
+    this.conversationCache.set(key, {
+      ts: Date.now(),
+      entries
+    })
+  }
+
+  static appendToConversationCache(key: string, incoming: any[], maxMessages: number): void {
+    const entry = this.conversationCache.get(key)
+    if (!entry || !Array.isArray(entry.entries)) return
+    const merged = [...entry.entries, ...incoming].slice(-maxMessages)
+    this.conversationCache.set(key, {
+      ts: Date.now(),
+      entries: merged
+    })
+  }
 
   constructor(
     private readonly ctx: ISupplyDataFunctions,
@@ -154,7 +196,7 @@ class Mem0ChatHistory {
       messages: [{ role, content: normalized }],
       infer: this.inferOnStore,
       metadata: {
-        source: 'n8n_mem0_memory_search_first',
+        source: 'n8n_mem0_memory_hybrid',
         role,
         channel: 'chat',
         memory_type: this.storeStrategy === 'facts_only' ? 'fact' : 'conversation'
@@ -237,9 +279,82 @@ export class Mem0Memory implements INodeType {
         displayName: 'Top K',
         name: 'topK',
         type: 'number',
-        default: 10,
+        default: 3,
         typeOptions: { minValue: 1, maxValue: 50 },
         description: 'Maximum number of relevant memories to retrieve per query'
+      },
+      {
+        displayName: 'Memory Mode',
+        name: 'memoryMode',
+        type: 'options',
+        default: 'conversation_pairs',
+        options: [
+          {
+            name: 'Conversation Pairs',
+            value: 'conversation_pairs',
+            description: 'Uses recent conversation buffer with semantic fallback options'
+          },
+          {
+            name: 'Semantic Facts',
+            value: 'semantic_facts',
+            description: 'Uses semantic search retrieval only'
+          }
+        ],
+        description: 'Primary retrieval mode for memory context'
+      },
+      {
+        displayName: 'Buffer Limit (Interactions)',
+        name: 'bufferLimit',
+        type: 'number',
+        default: 6,
+        typeOptions: { minValue: 1, maxValue: 200 },
+        description: 'How many latest user+assistant interactions to include in buffer mode',
+        displayOptions: {
+          show: {
+            memoryMode: ['conversation_pairs']
+          }
+        }
+      },
+      {
+        displayName: 'Fallback to Search on Buffer Miss',
+        name: 'fallbackToSearchOnBufferMiss',
+        type: 'boolean',
+        default: true,
+        description: 'When recent buffer appears unrelated to current query, fallback to semantic search',
+        displayOptions: {
+          show: {
+            memoryMode: ['conversation_pairs']
+          }
+        }
+      },
+      {
+        displayName: 'Conversation Retrieval Policy',
+        name: 'conversationRetrievalPolicy',
+        type: 'options',
+        default: 'smart_fallback',
+        options: [
+          {
+            name: 'Smart Fallback (Recommended)',
+            value: 'smart_fallback',
+            description: 'Uses recent buffer and falls back to semantic search when needed'
+          },
+          {
+            name: 'Search First',
+            value: 'search_first',
+            description: 'Always uses semantic search first, then recent buffer if empty'
+          },
+          {
+            name: 'Buffer First',
+            value: 'buffer_first',
+            description: 'Always uses recent conversation buffer only'
+          }
+        ],
+        description: 'How conversation mode chooses between recent buffer and semantic retrieval',
+        displayOptions: {
+          show: {
+            memoryMode: ['conversation_pairs']
+          }
+        }
       },
       {
         displayName: 'Search Query (Optional)',
@@ -282,6 +397,11 @@ export class Mem0Memory implements INodeType {
             name: 'All Memories',
             value: 'all',
             description: 'Includes assistant memories and conversation turns'
+          },
+          {
+            name: 'Legacy',
+            value: 'legacy',
+            description: 'Compatibility behavior from previous releases'
           }
         ],
         description: 'Retrieval strategy for search results filtering'
@@ -290,7 +410,7 @@ export class Mem0Memory implements INodeType {
         displayName: 'Max Context Characters',
         name: 'maxContextChars',
         type: 'number',
-        default: 700,
+        default: 450,
         typeOptions: { minValue: 100, maxValue: 8000 },
         description: 'Maximum total characters injected into AI context after retrieval'
       },
@@ -347,6 +467,13 @@ export class Mem0Memory implements INodeType {
         type: 'boolean',
         default: false,
         description: 'Legacy toggle kept for compatibility'
+      },
+      {
+        displayName: 'Debug Memory Retrieval',
+        name: 'debugMemory',
+        type: 'boolean',
+        default: false,
+        description: 'Adds retrieval diagnostics metadata to help troubleshooting'
       }
     ]
   }
@@ -359,18 +486,32 @@ export class Mem0Memory implements INodeType {
     const userId = String(this.getNodeParameter('userId', itemIndex, '') || '').trim()
     const agentId = String(this.getNodeParameter('agentId', itemIndex, '') || '').trim()
     const runId = String(this.getNodeParameter('runId', itemIndex, '') || '').trim()
-    const topK = Math.min(50, Math.max(1, Math.floor(Number(this.getNodeParameter('topK', itemIndex, 10) || 10))))
+    const topK = Math.min(50, Math.max(1, Math.floor(Number(this.getNodeParameter('topK', itemIndex, 3) || 3))))
+    const memoryMode = String(this.getNodeParameter('memoryMode', itemIndex, 'conversation_pairs') || 'conversation_pairs') as
+      | 'conversation_pairs'
+      | 'semantic_facts'
+    const bufferLimit = Math.max(1, Math.floor(Number(this.getNodeParameter('bufferLimit', itemIndex, 6) || 6)))
+    const fallbackToSearchOnBufferMiss = Boolean(this.getNodeParameter('fallbackToSearchOnBufferMiss', itemIndex, true))
+    const conversationRetrievalPolicy = String(this.getNodeParameter('conversationRetrievalPolicy', itemIndex, 'smart_fallback') || 'smart_fallback') as
+      | 'smart_fallback'
+      | 'search_first'
+      | 'buffer_first'
     const searchQuery = String(this.getNodeParameter('searchQuery', itemIndex, '') || '').trim()
     const defaultQuery = String(this.getNodeParameter('defaultQuery', itemIndex, FALLBACK_QUERY) || FALLBACK_QUERY).trim()
     const rerank = Boolean(this.getNodeParameter('rerank', itemIndex, false))
-    const searchMode = String(this.getNodeParameter('searchMode', itemIndex, 'balanced') || 'balanced') as 'balanced' | 'strict_facts' | 'all'
-    const maxContextChars = Math.max(100, Math.floor(Number(this.getNodeParameter('maxContextChars', itemIndex, 700) || 700)))
+    const searchMode = String(this.getNodeParameter('searchMode', itemIndex, 'balanced') || 'balanced') as
+      | 'balanced'
+      | 'strict_facts'
+      | 'all'
+      | 'legacy'
+    const maxContextChars = Math.max(100, Math.floor(Number(this.getNodeParameter('maxContextChars', itemIndex, 450) || 450)))
     const includeAssistantMemories = Boolean(this.getNodeParameter('includeAssistantMemories', itemIndex, false))
     const storeStrategy = String(this.getNodeParameter('storeStrategy', itemIndex, 'conversation') || 'conversation') as 'conversation' | 'facts_only'
     const fieldsInput = String(this.getNodeParameter('fields', itemIndex, '') || '').trim()
     const searchFiltersInput = String(this.getNodeParameter('searchFilters', itemIndex, '') || '').trim()
     const allowEmptyContext = Boolean(this.getNodeParameter('allowEmptyContext', itemIndex, false))
     const inferOnStore = Boolean(this.getNodeParameter('infer', itemIndex, false))
+    const debugMemory = Boolean(this.getNodeParameter('debugMemory', itemIndex, false))
 
     if (!userId || !agentId) {
       throw new NodeOperationError(this.getNode(), 'User ID and Agent ID are required.')
@@ -387,6 +528,136 @@ export class Mem0Memory implements INodeType {
       inferOnStore,
       storeStrategy
     })
+    const maxMessages = bufferLimit * 2
+    const strictCacheKey = Mem0ChatHistory.getScopedCacheKey(scope, maxMessages)
+    const globalCacheKey = Mem0ChatHistory.getGlobalCacheKey(scope.user_id, scope.agent_id, maxMessages)
+
+    const appendRecentMessagesToCache = (inputValues: any, outputValues: any): void => {
+      const userInput = String(inputValues?.input || inputValues?.query || inputValues?.human_input || inputValues?.chatInput || '').trim()
+      const assistantOutput = String(outputValues?.output || outputValues?.response || outputValues?.text || '').trim()
+      const now = new Date().toISOString()
+      const incoming: any[] = []
+
+      if (userInput) {
+        incoming.push({
+          memory: userInput,
+          metadata: { role: 'user' },
+          created_at: now
+        })
+      }
+
+      if (assistantOutput && storeStrategy !== 'facts_only') {
+        incoming.push({
+          memory: assistantOutput,
+          metadata: { role: 'assistant' },
+          created_at: now
+        })
+      }
+
+      if (incoming.length > 0) {
+        Mem0ChatHistory.appendToConversationCache(strictCacheKey, incoming, maxMessages)
+        Mem0ChatHistory.appendToConversationCache(globalCacheKey, incoming, maxMessages)
+      }
+    }
+
+    const normalizeConversationEntries = (entries: any[]): any[] => {
+      return entries
+        .filter((entry: any) => {
+          const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase()
+          return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai'
+        })
+        .sort((a: any, b: any) => {
+          const aTs = new Date(a?.created_at || a?.updated_at || 0).getTime() || 0
+          const bTs = new Date(b?.created_at || b?.updated_at || 0).getTime() || 0
+          return aTs - bTs
+        })
+    }
+
+    const loadConversationMessages = async (): Promise<any[]> => {
+      const cachedStrict = Mem0ChatHistory.getConversationCache(strictCacheKey)
+      if (cachedStrict) {
+        return cachedStrict.map((entry: any) => toLangchainMessage(entry))
+      }
+
+      const strictScope: Record<string, unknown> = runId
+        ? { user_id: scope.user_id, agent_id: scope.agent_id, run_id: scope.run_id }
+        : { user_id: scope.user_id, agent_id: scope.agent_id }
+
+      const response = await mem0ApiRequest.call(this, 'GET', '/memories', {}, strictScope)
+      const strictResults = extractResults(response)
+      const strictNormalized = normalizeConversationEntries(strictResults)
+
+      let selected = strictNormalized.slice(-maxMessages)
+
+      // Continuity support: if current run has little history, pull a small tail from previous runs.
+      if (runId && selected.length < maxMessages) {
+        let globalNormalized = Mem0ChatHistory.getConversationCache(globalCacheKey)
+        if (!globalNormalized) {
+          const globalResponse = await mem0ApiRequest.call(this, 'GET', '/memories', {}, {
+            user_id: scope.user_id,
+            agent_id: scope.agent_id
+          })
+          const globalResults = extractResults(globalResponse)
+          globalNormalized = normalizeConversationEntries(globalResults)
+          Mem0ChatHistory.setConversationCache(globalCacheKey, globalNormalized)
+        }
+        const strictIdentity = new Set(
+          strictNormalized.map((entry: any) =>
+            String(entry?.id || `${entry?.created_at || ''}|${entry?.metadata?.role || entry?.role || ''}|${toMessageContent(entry)}`)
+          )
+        )
+
+        const previousOnly = globalNormalized.filter((entry: any) => {
+          const key = String(entry?.id || `${entry?.created_at || ''}|${entry?.metadata?.role || entry?.role || ''}|${toMessageContent(entry)}`)
+          return !strictIdentity.has(key)
+        })
+        const missing = Math.max(0, maxMessages - selected.length)
+        if (missing > 0) {
+          selected = [...previousOnly.slice(-missing), ...selected].slice(-maxMessages)
+        }
+      }
+
+      Mem0ChatHistory.setConversationCache(strictCacheKey, selected)
+      return selected.map((entry: any) => toLangchainMessage(entry))
+    }
+
+    const shouldFallbackToSearch = (values: any, bufferMessages: any[]): boolean => {
+      if (!fallbackToSearchOnBufferMiss) return false
+      if (bufferMessages.length === 0) return true
+
+      const query = String(values?.input || values?.query || values?.human_input || values?.chatInput || values?.text || values?.message || '')
+        .trim()
+        .toLowerCase()
+      if (!query) return false
+
+      // Identity/profile recall questions should strongly prefer semantic fallback.
+      const factualRecallPattern =
+        /(qual.*meu nome|meu nome|what.*my name|my name|quem sou eu|who am i|prefer|prefiro|gosto|where.*live|onde eu moro|location|idade|age)/i
+      if (factualRecallPattern.test(query)) return true
+
+      const bufferText = bufferMessages
+        .map((m: any) => String(m?.content || ''))
+        .join(' ')
+        .toLowerCase()
+
+      const stopwords = new Set([
+        'a', 'an', 'and', 'are', 'as', 'at', 'do', 'for', 'from', 'how', 'i', 'in', 'is', 'it', 'me', 'my', 'of', 'on', 'or', 'the',
+        'to', 'was', 'what', 'where', 'who', 'com', 'como', 'da', 'de', 'do', 'e', 'ele', 'ela', 'em', 'eu', 'isso', 'meu', 'minha',
+        'na', 'no', 'o', 'os', 'para', 'por', 'qual', 'que', 'se', 'uma', 'um', 'yo', 'mi', 'donde', 'el', 'la', 'los', 'las', 'un', 'una'
+      ])
+      const tokens = query
+        .split(/[^a-z0-9]+/i)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 3 && !stopwords.has(t))
+
+      if (tokens.length === 0) return false
+      const matchedCount = tokens.filter((t) => bufferText.includes(t)).length
+      const coverage = matchedCount / tokens.length
+      if (matchedCount === 0) return true
+      if (tokens.length >= 3 && coverage < 0.6) return true
+      if (tokens.length >= 5 && matchedCount < 2) return true
+      return false
+    }
 
     const searchMessages = async (values: any): Promise<any[]> => {
       let effectiveQuery = searchQuery || ''
@@ -497,12 +768,18 @@ export class Mem0Memory implements INodeType {
 
       const roleApplied = filtered.length > 0 ? filtered : results
 
-      const assistantFiltered = includeAssistantMemories
-        ? roleApplied
-        : roleApplied.filter((entry: any) => {
-            const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase()
-            return role === 'user' || role === 'human'
-          })
+      const assistantFiltered =
+        searchMode === 'legacy'
+          ? roleApplied.filter((entry: any) => {
+              const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase()
+              return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai'
+            })
+          : includeAssistantMemories
+            ? roleApplied
+            : roleApplied.filter((entry: any) => {
+                const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase()
+                return role === 'user' || role === 'human'
+              })
 
       const contentSanitized = assistantFiltered.filter((entry: any) => {
         const text = toMessageContent(entry).trim()
@@ -554,12 +831,47 @@ export class Mem0Memory implements INodeType {
         finalResults.push(results[0])
       }
 
-      return finalResults.map((entry: any) => toLangchainMessage(entry))
+      const messages = finalResults.map((entry: any) => toLangchainMessage(entry))
+      if (debugMemory && messages.length > 0) {
+        ;(messages[0] as any).additional_kwargs = {
+          ...((messages[0] as any).additional_kwargs || {}),
+          mem0_debug: {
+            source: 'semantic_search',
+            query: effectiveQuery,
+            results: finalResults.length
+          }
+        }
+      }
+      return messages
+    }
+
+    const resolveConversationMessages = async (values: any, retrieveFn: (inputValues: any) => Promise<any[]>): Promise<any[]> => {
+      const bufferMessages = await loadConversationMessages()
+
+      if (conversationRetrievalPolicy === 'buffer_first') {
+        return bufferMessages
+      }
+
+      if (conversationRetrievalPolicy === 'search_first') {
+        const searchResults = await retrieveFn(values)
+        if (searchResults.length > 0) return searchResults
+        return bufferMessages
+      }
+
+      const fallback = shouldFallbackToSearch(values, bufferMessages)
+      if (!fallback) return bufferMessages
+      const searchResults = await retrieveFn(values)
+      if (searchResults.length === 0) return bufferMessages
+
+      // Keep a tiny recent conversational tail so chat_history remains Human+AI contextual.
+      const tailSize = Math.min(4, bufferMessages.length)
+      const recentTail = tailSize > 0 ? bufferMessages.slice(-tailSize) : []
+      return [...recentTail, ...searchResults]
     }
 
     const memory = BufferWindowMemory
       ? (() => {
-          class SearchFirstBufferMemory extends BufferWindowMemory {
+          class HybridBufferMemory extends BufferWindowMemory {
             private readonly retrieveFn: (values: any) => Promise<any[]>
 
             constructor(fields: any, retrieveFn: (values: any) => Promise<any[]>) {
@@ -568,19 +880,29 @@ export class Mem0Memory implements INodeType {
             }
 
             async loadMemoryVariables(values: any): Promise<Record<string, any>> {
-              const messages = await this.retrieveFn(values)
+              const messages =
+                memoryMode === 'conversation_pairs'
+                  ? await resolveConversationMessages(values, this.retrieveFn)
+                  : await this.retrieveFn(values)
               return { [this.memoryKey]: messages }
+            }
+
+            async saveContext(inputValues: any, outputValues: any): Promise<void> {
+              if (typeof super.saveContext === 'function') {
+                await super.saveContext(inputValues, outputValues)
+              }
+              appendRecentMessagesToCache(inputValues, outputValues)
             }
           }
 
-          return new SearchFirstBufferMemory(
+          return new HybridBufferMemory(
             {
               memoryKey: 'chat_history',
               chatHistory,
               returnMessages: true,
               inputKey: 'input',
               outputKey: 'output',
-              k: topK
+              k: Math.max(topK, bufferLimit * 2)
             },
             searchMessages
           )
@@ -592,7 +914,10 @@ export class Mem0Memory implements INodeType {
           inputKey: 'input',
           outputKey: 'output',
           async loadMemoryVariables(values: any) {
-            const messages = await searchMessages(values)
+            const messages =
+              memoryMode === 'conversation_pairs'
+                ? await resolveConversationMessages(values, searchMessages)
+                : await searchMessages(values)
             return { chat_history: messages }
           },
           async saveContext(inputValues: any, outputValues: any) {
@@ -600,6 +925,7 @@ export class Mem0Memory implements INodeType {
             const assistantOutput = String(outputValues?.output || outputValues?.response || outputValues?.text || '').trim()
             if (userInput) await chatHistory.addUserMessage(userInput)
             if (assistantOutput) await chatHistory.addAIMessage(assistantOutput)
+            appendRecentMessagesToCache(inputValues, outputValues)
           },
           async clear() {
             return
