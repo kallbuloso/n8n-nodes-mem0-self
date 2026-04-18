@@ -390,69 +390,45 @@ class Mem0Memory {
             scopeCandidates.push({ user_id: scope.user_id, agent_id: scope.agent_id });
             scopeCandidates.push({ user_id: scope.user_id });
             let results = [];
-            if (searchFilters && Object.keys(searchFilters).length > 0) {
+            let hadSearchError = false;
+            let lastSearchError = null;
+            const runScopedSearch = async (extraBody = {}) => {
+                let scopedResults = [];
                 for (const scopeCandidate of scopeCandidates) {
                     const body = {
                         query: effectiveQuery,
                         top_k: topK,
                         rerank,
                         ...scopeCandidate,
-                        filters: searchFilters
+                        ...extraBody
                     };
                     if (fields)
                         body.fields = fields;
                     try {
                         const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
-                        results = (0, GenericFunctions_1.extractResults)(response);
-                        if (results.length > 0)
+                        scopedResults = (0, GenericFunctions_1.extractResults)(response);
+                        if (scopedResults.length > 0)
                             break;
                     }
-                    catch {
-                        // continue
+                    catch (error) {
+                        hadSearchError = true;
+                        lastSearchError = error;
                     }
                 }
+                return scopedResults;
+            };
+            if (searchFilters && Object.keys(searchFilters).length > 0) {
+                results = await runScopedSearch({ filters: searchFilters });
                 if (results.length === 0 && !allowEmptyContext) {
-                    for (const scopeCandidate of scopeCandidates) {
-                        const body = {
-                            query: effectiveQuery,
-                            top_k: topK,
-                            rerank,
-                            ...scopeCandidate
-                        };
-                        if (fields)
-                            body.fields = fields;
-                        try {
-                            const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
-                            results = (0, GenericFunctions_1.extractResults)(response);
-                            if (results.length > 0)
-                                break;
-                        }
-                        catch {
-                            // continue
-                        }
-                    }
+                    results = await runScopedSearch();
                 }
             }
             else {
-                for (const scopeCandidate of scopeCandidates) {
-                    const body = {
-                        query: effectiveQuery,
-                        top_k: topK,
-                        rerank,
-                        ...scopeCandidate
-                    };
-                    if (fields)
-                        body.fields = fields;
-                    try {
-                        const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
-                        results = (0, GenericFunctions_1.extractResults)(response);
-                        if (results.length > 0)
-                            break;
-                    }
-                    catch {
-                        // continue
-                    }
-                }
+                results = await runScopedSearch();
+            }
+            if (results.length === 0 && hadSearchError) {
+                const errorMessage = lastSearchError instanceof Error ? lastSearchError.message : String(lastSearchError ?? 'Unknown error');
+                throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Mem0 search failed for all scope candidates. Last error: ${errorMessage}`);
             }
             let filtered = results;
             if (searchMode === 'strict_facts') {
@@ -469,10 +445,11 @@ class Mem0Memory {
                 });
             }
             const roleApplied = filtered.length > 0 ? filtered : results;
-            const assistantFiltered = includeAssistantMemories ? roleApplied :
-                roleApplied.filter((entry) => {
+            const assistantFiltered = includeAssistantMemories
+                ? roleApplied
+                : roleApplied.filter((entry) => {
                     const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
-                    return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai';
+                    return role === 'user' || role === 'human';
                 });
             const contentSanitized = assistantFiltered.filter((entry) => {
                 const text = toMessageContent(entry).trim();

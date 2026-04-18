@@ -436,64 +436,49 @@ export class Mem0Memory implements INodeType {
       scopeCandidates.push({ user_id: scope.user_id })
 
       let results: any[] = []
+      let hadSearchError = false
+      let lastSearchError: unknown = null
 
-      if (searchFilters && Object.keys(searchFilters).length > 0) {
+      const runScopedSearch = async (extraBody: Record<string, unknown> = {}): Promise<any[]> => {
+        let scopedResults: any[] = []
         for (const scopeCandidate of scopeCandidates) {
           const body: Record<string, unknown> = {
             query: effectiveQuery,
             top_k: topK,
             rerank,
             ...scopeCandidate,
-            filters: searchFilters
+            ...extraBody
           }
           if (fields) body.fields = fields
 
           try {
             const response = await mem0ApiRequest.call(this, 'POST', '/search', body)
-            results = extractResults(response)
-            if (results.length > 0) break
-          } catch {
-            // continue
+            scopedResults = extractResults(response)
+            if (scopedResults.length > 0) break
+          } catch (error) {
+            hadSearchError = true
+            lastSearchError = error
           }
         }
+        return scopedResults
+      }
+
+      if (searchFilters && Object.keys(searchFilters).length > 0) {
+        results = await runScopedSearch({ filters: searchFilters })
 
         if (results.length === 0 && !allowEmptyContext) {
-          for (const scopeCandidate of scopeCandidates) {
-            const body: Record<string, unknown> = {
-              query: effectiveQuery,
-              top_k: topK,
-              rerank,
-              ...scopeCandidate
-            }
-            if (fields) body.fields = fields
-
-            try {
-              const response = await mem0ApiRequest.call(this, 'POST', '/search', body)
-              results = extractResults(response)
-              if (results.length > 0) break
-            } catch {
-              // continue
-            }
-          }
+          results = await runScopedSearch()
         }
       } else {
-        for (const scopeCandidate of scopeCandidates) {
-          const body: Record<string, unknown> = {
-            query: effectiveQuery,
-            top_k: topK,
-            rerank,
-            ...scopeCandidate
-          }
-          if (fields) body.fields = fields
+        results = await runScopedSearch()
+      }
 
-          try {
-            const response = await mem0ApiRequest.call(this, 'POST', '/search', body)
-            results = extractResults(response)
-            if (results.length > 0) break
-          } catch {
-            // continue
-          }
-        }
+      if (results.length === 0 && hadSearchError) {
+        const errorMessage = lastSearchError instanceof Error ? lastSearchError.message : String(lastSearchError ?? 'Unknown error')
+        throw new NodeOperationError(
+          this.getNode(),
+          `Mem0 search failed for all scope candidates. Last error: ${errorMessage}`
+        )
       }
 
       let filtered = results
@@ -512,11 +497,12 @@ export class Mem0Memory implements INodeType {
 
       const roleApplied = filtered.length > 0 ? filtered : results
 
-      const assistantFiltered = includeAssistantMemories ? roleApplied : 
-        roleApplied.filter((entry: any) => {
-          const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase()
-          return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai'
-        })
+      const assistantFiltered = includeAssistantMemories
+        ? roleApplied
+        : roleApplied.filter((entry: any) => {
+            const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase()
+            return role === 'user' || role === 'human'
+          })
 
       const contentSanitized = assistantFiltered.filter((entry: any) => {
         const text = toMessageContent(entry).trim()
