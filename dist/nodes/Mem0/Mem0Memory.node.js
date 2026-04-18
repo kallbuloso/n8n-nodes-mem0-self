@@ -79,7 +79,6 @@ function toMessageContent(memory) {
 function toLangchainMessage(memory) {
     const content = toMessageContent(memory);
     const role = String(memory?.metadata?.role || memory?.role || '').toLowerCase();
-    // Ensure message has full LangChain structure
     const createMsg = (MsgClass) => {
         const msg = new MsgClass(content);
         msg.additional_kwargs = memory?.additional_kwargs || {};
@@ -106,68 +105,6 @@ class Mem0ChatHistory {
         this.inferOnStore = options.inferOnStore;
         this.storeStrategy = options.storeStrategy;
     }
-    // ===== SLIDING WINDOW METHODS =====
-    /**
-     * Generate scope key from user_id + agent_id (global, no run_id)
-     * Used as Map key for cache isolation per user+agent combo
-     */
-    static getScopeKey(user_id, agent_id) {
-        return `${user_id}|${agent_id}`;
-    }
-    /**
-     * Record the last loaded index for this scope.
-     * Tracks progression through message history.
-     * @param user_id User identifier
-     * @param agent_id Agent identifier
-     * @param index Last message index loaded
-     */
-    static recordLastIndex(user_id, agent_id, index) {
-        const key = this.getScopeKey(user_id, agent_id);
-        this.lastSeenIndices.set(key, index);
-        this.scopeTimestamps.set(key, Date.now());
-    }
-    /**
-     * Get the last recorded index for this scope.
-     * Returns -1 if never loaded (first interaction).
-     * @param user_id User identifier
-     * @param agent_id Agent identifier
-     * @returns Last index or -1 if first time
-     */
-    static getLastIndex(user_id, agent_id) {
-        return this.lastSeenIndices.get(this.getScopeKey(user_id, agent_id)) ?? -1;
-    }
-    /**
-     * Cache messages for sliding window buffer.
-     * @param user_id User identifier
-     * @param agent_id Agent identifier
-     * @param messages Array of messages to cache
-     */
-    static cacheMessages(user_id, agent_id, messages) {
-        this.cachedMessages.set(this.getScopeKey(user_id, agent_id), messages);
-    }
-    /**
-     * Retrieve cached messages for this scope.
-     * Returns undefined if no cache exists.
-     * @param user_id User identifier
-     * @param agent_id Agent identifier
-     * @returns Cached messages or undefined
-     */
-    static getCachedMessages(user_id, agent_id) {
-        return this.cachedMessages.get(this.getScopeKey(user_id, agent_id));
-    }
-    /**
-     * Invalidate cache after saveContext().
-     * Forces fresh load on next interaction.
-     * Note: Does NOT delete lastSeenIndices to maintain progression tracking.
-     * @param user_id User identifier
-     * @param agent_id Agent identifier
-     */
-    static invalidateCache(user_id, agent_id) {
-        const key = this.getScopeKey(user_id, agent_id);
-        this.cachedMessages.delete(key);
-        // Keep lastSeenIndices for tracking progression
-    }
-    // ===== END SLIDING WINDOW METHODS =====
     normalizeRole(message) {
         const role = String(message?.role || message?.type || message?._getType?.() || '').toLowerCase();
         if (role === 'assistant' || role === 'ai')
@@ -193,7 +130,7 @@ class Mem0ChatHistory {
             messages: [{ role, content: normalized }],
             infer: this.inferOnStore,
             metadata: {
-                source: 'n8n_mem0_memory_safe',
+                source: 'n8n_mem0_memory_search_first',
                 role,
                 channel: 'chat',
                 memory_type: this.storeStrategy === 'facts_only' ? 'fact' : 'conversation'
@@ -202,7 +139,6 @@ class Mem0ChatHistory {
         });
     }
     async getMessages() {
-        // Search-first mode: history retrieval is handled by loadMemoryVariables/query.
         return [];
     }
     async addMessage(message) {
@@ -224,17 +160,10 @@ class Mem0ChatHistory {
     async addAIChatMessage(message) {
         await this.append('assistant', message);
     }
-    // Safe profile: intentionally non-destructive.
     async clear() {
         return;
     }
 }
-// Sliding Window: Track last loaded index per scope (user_id|agent_id)
-Mem0ChatHistory.lastSeenIndices = new Map();
-// Sliding Window: Cache messages per scope (user_id|agent_id)
-Mem0ChatHistory.cachedMessages = new Map();
-// Sliding Window: Track timestamps for optional LRU cleanup (v0.2.14)
-Mem0ChatHistory.scopeTimestamps = new Map();
 class Mem0Memory {
     constructor() {
         this.description = {
@@ -282,43 +211,25 @@ class Mem0Memory {
                     description: 'Maximum number of relevant memories to retrieve per query'
                 },
                 {
-                    displayName: 'Buffer Limit (Interactions)',
-                    name: 'bufferLimit',
-                    type: 'number',
-                    default: 20,
-                    typeOptions: { minValue: 1, maxValue: 200 },
-                    description: 'How many latest user+assistant interactions to include in conversation mode'
+                    displayName: 'Search Query (Optional)',
+                    name: 'searchQuery',
+                    type: 'string',
+                    default: '',
+                    description: 'Custom search query. If empty, uses user input from workflow context'
                 },
                 {
-                    displayName: 'Fallback to Search on Buffer Miss',
-                    name: 'fallbackToSearchOnBufferMiss',
+                    displayName: 'Fallback Query',
+                    name: 'defaultQuery',
+                    type: 'string',
+                    default: 'user profile, preferences, and important facts',
+                    description: 'Fallback search query when no input is available'
+                },
+                {
+                    displayName: 'Rerank Results',
+                    name: 'rerank',
                     type: 'boolean',
-                    default: true,
-                    description: 'When the buffer appears unrelated to the current query, fallback to Mem0 semantic search'
-                },
-                {
-                    displayName: 'Conversation Retrieval Policy',
-                    name: 'conversationRetrievalPolicy',
-                    type: 'options',
-                    default: 'smart_fallback',
-                    options: [
-                        {
-                            name: 'Smart Fallback (Recommended)',
-                            value: 'smart_fallback',
-                            description: 'Uses buffer first, then falls back to search when relevance is low'
-                        },
-                        {
-                            name: 'Search First',
-                            value: 'search_first',
-                            description: 'Always retrieves with semantic search first, then falls back to buffer if empty'
-                        },
-                        {
-                            name: 'Buffer First',
-                            value: 'buffer_first',
-                            description: 'Always uses recent buffer only'
-                        }
-                    ],
-                    description: 'How conversation mode chooses between buffer and semantic retrieval'
+                    default: false,
+                    description: 'Enable semantic reranking in Mem0 search for improved relevance'
                 },
                 {
                     displayName: 'Search Mode',
@@ -337,12 +248,12 @@ class Mem0Memory {
                             description: 'Prefers user factual memories only'
                         },
                         {
-                            name: 'Legacy',
-                            value: 'legacy',
-                            description: 'Previous compatibility behavior'
+                            name: 'All Memories',
+                            value: 'all',
+                            description: 'Includes assistant memories and conversation turns'
                         }
                     ],
-                    description: 'Retrieval strategy used for search results post-processing'
+                    description: 'Retrieval strategy for search results filtering'
                 },
                 {
                     displayName: 'Max Context Characters',
@@ -351,27 +262,6 @@ class Mem0Memory {
                     default: 700,
                     typeOptions: { minValue: 100, maxValue: 8000 },
                     description: 'Maximum total characters injected into AI context after retrieval'
-                },
-                {
-                    displayName: 'Default Query',
-                    name: 'defaultQuery',
-                    type: 'string',
-                    default: '',
-                    description: 'Fallback search query when no user input is available'
-                },
-                {
-                    displayName: 'Rerank',
-                    name: 'rerank',
-                    type: 'boolean',
-                    default: false,
-                    description: 'Enable reranking in Mem0 search'
-                },
-                {
-                    displayName: 'Fields (Comma Separated)',
-                    name: 'fields',
-                    type: 'string',
-                    default: '',
-                    description: 'Optional fields list for search response'
                 },
                 {
                     displayName: 'Include Assistant Memories',
@@ -387,17 +277,24 @@ class Mem0Memory {
                     default: 'conversation',
                     options: [
                         {
-                            name: 'Conversation (Compatible)',
+                            name: 'Conversation (Default)',
                             value: 'conversation',
                             description: 'Stores user and assistant turns'
                         },
                         {
                             name: 'Facts Only',
                             value: 'facts_only',
-                            description: 'Stores user factual signals and avoids assistant turn noise'
+                            description: 'Stores user factual signals only, avoids assistant noise'
                         }
                     ],
                     description: 'How messages are persisted into memory'
+                },
+                {
+                    displayName: 'Fields (Comma Separated)',
+                    name: 'fields',
+                    type: 'string',
+                    default: '',
+                    description: 'Optional fields list for search response'
                 },
                 {
                     displayName: 'Search Filters (JSON)',
@@ -414,11 +311,11 @@ class Mem0Memory {
                     description: 'If disabled, retrieval automatically falls back before returning empty context'
                 },
                 {
-                    displayName: 'Infer on Store',
+                    displayName: 'Infer on Store (Legacy)',
                     name: 'infer',
                     type: 'boolean',
                     default: false,
-                    description: 'Legacy toggle kept for compatibility. Safe profile stores raw chat turns.'
+                    description: 'Legacy toggle kept for compatibility'
                 }
             ]
         };
@@ -431,17 +328,14 @@ class Mem0Memory {
         const agentId = String(this.getNodeParameter('agentId', itemIndex, '') || '').trim();
         const runId = String(this.getNodeParameter('runId', itemIndex, '') || '').trim();
         const topK = Math.min(50, Math.max(1, Math.floor(Number(this.getNodeParameter('topK', itemIndex, 10) || 10))));
-        const memoryMode = 'conversation_pairs';
-        const bufferLimit = Math.max(1, Math.floor(Number(this.getNodeParameter('bufferLimit', itemIndex, 20) || 20)));
-        const defaultQuery = String(this.getNodeParameter('defaultQuery', itemIndex, '') || '').trim();
+        const searchQuery = String(this.getNodeParameter('searchQuery', itemIndex, '') || '').trim();
+        const defaultQuery = String(this.getNodeParameter('defaultQuery', itemIndex, FALLBACK_QUERY) || FALLBACK_QUERY).trim();
         const rerank = Boolean(this.getNodeParameter('rerank', itemIndex, false));
-        const fieldsInput = String(this.getNodeParameter('fields', itemIndex, '') || '').trim();
         const searchMode = String(this.getNodeParameter('searchMode', itemIndex, 'balanced') || 'balanced');
         const maxContextChars = Math.max(100, Math.floor(Number(this.getNodeParameter('maxContextChars', itemIndex, 700) || 700)));
         const includeAssistantMemories = Boolean(this.getNodeParameter('includeAssistantMemories', itemIndex, false));
         const storeStrategy = String(this.getNodeParameter('storeStrategy', itemIndex, 'conversation') || 'conversation');
-        const fallbackToSearchOnBufferMiss = Boolean(this.getNodeParameter('fallbackToSearchOnBufferMiss', itemIndex, true));
-        const conversationRetrievalPolicy = String(this.getNodeParameter('conversationRetrievalPolicy', itemIndex, 'smart_fallback') || 'smart_fallback');
+        const fieldsInput = String(this.getNodeParameter('fields', itemIndex, '') || '').trim();
         const searchFiltersInput = String(this.getNodeParameter('searchFilters', itemIndex, '') || '').trim();
         const allowEmptyContext = Boolean(this.getNodeParameter('allowEmptyContext', itemIndex, false));
         const inferOnStore = Boolean(this.getNodeParameter('infer', itemIndex, false));
@@ -459,155 +353,20 @@ class Mem0Memory {
             inferOnStore,
             storeStrategy
         });
-        const loadConversationMessages = async () => {
-            // Sliding Window: Check if this is the first load
-            const lastIndex = Mem0ChatHistory.getLastIndex(scope.user_id, scope.agent_id);
-            const maxMessages = bufferLimit * 2;
-            // ===== FIRST INTERACTION: Load full buffer =====
-            if (lastIndex === -1) {
-                // Conversation buffer is intentionally strict-scoped to avoid bringing all historical chats.
-                const strictScope = runId
-                    ? { user_id: scope.user_id, agent_id: scope.agent_id, run_id: scope.run_id }
-                    : { user_id: scope.user_id, agent_id: scope.agent_id };
-                const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'GET', '/memories', {}, strictScope);
-                const results = (0, GenericFunctions_1.extractResults)(response);
-                const normalized = results
-                    .filter((entry) => {
-                    const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
-                    return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai';
-                })
-                    .sort((a, b) => {
-                    const aTs = new Date(a?.created_at || a?.updated_at || 0).getTime() || 0;
-                    const bTs = new Date(b?.created_at || b?.updated_at || 0).getTime() || 0;
-                    return bTs - aTs; // descendente: mais recentes primeiro
-                })
-                    .slice(0, maxMessages);
-                // Record that we've loaded and cache for sliding window
-                Mem0ChatHistory.recordLastIndex(scope.user_id, scope.agent_id, maxMessages - 1);
-                Mem0ChatHistory.cacheMessages(scope.user_id, scope.agent_id, normalized);
-                // Return in chronological order
-                return normalized.reverse().map((entry) => toLangchainMessage(entry));
-            }
-            // ===== SUBSEQUENT INTERACTIONS: Sliding Window =====
-            const cachedMessages = Mem0ChatHistory.getCachedMessages(scope.user_id, scope.agent_id);
-            if (cachedMessages && cachedMessages.length > 0) {
-                // Remove oldest 2 interactions (slide window forward)
-                const slidingWindow = cachedMessages.slice(2);
-                // Fetch only the newest message to append
-                const strictScope = runId
-                    ? { user_id: scope.user_id, agent_id: scope.agent_id, run_id: scope.run_id }
-                    : { user_id: scope.user_id, agent_id: scope.agent_id };
-                const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'GET', '/memories', { limit: 1 }, strictScope);
-                const results = (0, GenericFunctions_1.extractResults)(response);
-                const filtered = results.filter((entry) => {
-                    const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
-                    return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai';
-                });
-                if (filtered.length > 0) {
-                    const newest = filtered[0];
-                    slidingWindow.push(newest);
-                    Mem0ChatHistory.recordLastIndex(scope.user_id, scope.agent_id, lastIndex + 1);
-                    Mem0ChatHistory.cacheMessages(scope.user_id, scope.agent_id, slidingWindow);
-                }
-                // Return in chronological order
-                return slidingWindow.reverse().map((entry) => toLangchainMessage(entry));
-            }
-            // Fallback: If cache is empty, do full reload
-            return loadConversationMessages();
-        };
-        const shouldFallbackToSearch = (values, bufferMessages) => {
-            if (!fallbackToSearchOnBufferMiss)
-                return false;
-            if (bufferMessages.length === 0)
-                return true;
-            const query = String(values?.input || values?.query || values?.human_input || values?.chatInput || values?.text || values?.message || '')
-                .trim()
-                .toLowerCase();
-            if (!query)
-                return false;
-            const bufferText = bufferMessages
-                .map((m) => String(m?.content || ''))
-                .join(' ')
-                .toLowerCase();
-            const stopwords = new Set([
-                'a',
-                'an',
-                'and',
-                'are',
-                'as',
-                'at',
-                'do',
-                'for',
-                'from',
-                'how',
-                'i',
-                'in',
-                'is',
-                'it',
-                'me',
-                'my',
-                'of',
-                'on',
-                'or',
-                'the',
-                'to',
-                'was',
-                'what',
-                'where',
-                'who',
-                'com',
-                'como',
-                'da',
-                'de',
-                'do',
-                'e',
-                'ele',
-                'ela',
-                'em',
-                'eu',
-                'isso',
-                'meu',
-                'minha',
-                'na',
-                'no',
-                'o',
-                'os',
-                'para',
-                'por',
-                'qual',
-                'que',
-                'se',
-                'uma',
-                'um',
-                'yo',
-                'mi',
-                'donde',
-                'el',
-                'la',
-                'los',
-                'las',
-                'un',
-                'una'
-            ]);
-            const tokens = query
-                .split(/[^a-z0-9]+/i)
-                .map((t) => t.trim())
-                .filter((t) => t.length >= 3 && !stopwords.has(t));
-            if (tokens.length === 0)
-                return false;
-            const matchedCount = tokens.filter((t) => bufferText.includes(t)).length;
-            const coverage = matchedCount / tokens.length;
-            if (matchedCount === 0)
-                return true;
-            if (tokens.length >= 3 && coverage < 0.6)
-                return true;
-            if (tokens.length >= 5 && matchedCount < 2)
-                return true;
-            return false;
-        };
         const searchMessages = async (values) => {
-            const rawQuery = String(values?.input || values?.query || values?.human_input || values?.chatInput || values?.text || values?.message || defaultQuery || '').trim();
-            const effectiveQuery = rawQuery || FALLBACK_QUERY;
+            let effectiveQuery = searchQuery || '';
+            if (!effectiveQuery) {
+                effectiveQuery = String(values?.input ||
+                    values?.query ||
+                    values?.human_input ||
+                    values?.chatInput ||
+                    values?.text ||
+                    values?.message ||
+                    '').trim();
+            }
+            if (!effectiveQuery) {
+                effectiveQuery = defaultQuery || FALLBACK_QUERY;
+            }
             if (effectiveQuery.length > MAX_QUERY_LENGTH) {
                 throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Search query is too long. Maximum supported length is ${MAX_QUERY_LENGTH} characters.`);
             }
@@ -627,38 +386,54 @@ class Mem0Memory {
                 }
             }
             const scopeCandidates = [];
-            // 1) Most strict
             scopeCandidates.push({ ...scope });
-            // 2) Relax run_id
-            scopeCandidates.push({
-                user_id: scope.user_id,
-                agent_id: scope.agent_id
-            });
-            // 3) User-only fallback
-            scopeCandidates.push({
-                user_id: scope.user_id
-            });
+            scopeCandidates.push({ user_id: scope.user_id, agent_id: scope.agent_id });
+            scopeCandidates.push({ user_id: scope.user_id });
             let results = [];
-            let filteredAttempt = Boolean(searchFilters && Object.keys(searchFilters).length > 0);
-            const strictFactsMode = searchMode === 'strict_facts';
-            for (const scopeCandidate of scopeCandidates) {
-                const body = {
-                    query: effectiveQuery,
-                    top_k: topK,
-                    rerank,
-                    ...scopeCandidate
-                };
-                if (fields)
-                    body.fields = fields;
-                if (searchFilters)
-                    body.filters = searchFilters;
-                const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
-                results = (0, GenericFunctions_1.extractResults)(response);
-                if (results.length > 0)
-                    break;
+            if (searchFilters && Object.keys(searchFilters).length > 0) {
+                for (const scopeCandidate of scopeCandidates) {
+                    const body = {
+                        query: effectiveQuery,
+                        top_k: topK,
+                        rerank,
+                        ...scopeCandidate,
+                        filters: searchFilters
+                    };
+                    if (fields)
+                        body.fields = fields;
+                    try {
+                        const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
+                        results = (0, GenericFunctions_1.extractResults)(response);
+                        if (results.length > 0)
+                            break;
+                    }
+                    catch {
+                        // continue
+                    }
+                }
+                if (results.length === 0 && !allowEmptyContext) {
+                    for (const scopeCandidate of scopeCandidates) {
+                        const body = {
+                            query: effectiveQuery,
+                            top_k: topK,
+                            rerank,
+                            ...scopeCandidate
+                        };
+                        if (fields)
+                            body.fields = fields;
+                        try {
+                            const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
+                            results = (0, GenericFunctions_1.extractResults)(response);
+                            if (results.length > 0)
+                                break;
+                        }
+                        catch {
+                            // continue
+                        }
+                    }
+                }
             }
-            // Fallback: if strict/filtered attempt returned nothing, retry without filters on the same cascade.
-            if (!allowEmptyContext && results.length === 0 && filteredAttempt) {
+            else {
                 for (const scopeCandidate of scopeCandidates) {
                     const body = {
                         query: effectiveQuery,
@@ -668,44 +443,46 @@ class Mem0Memory {
                     };
                     if (fields)
                         body.fields = fields;
-                    const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
-                    results = (0, GenericFunctions_1.extractResults)(response);
-                    if (results.length > 0)
-                        break;
+                    try {
+                        const response = await GenericFunctions_1.mem0ApiRequest.call(this, 'POST', '/search', body);
+                        results = (0, GenericFunctions_1.extractResults)(response);
+                        if (results.length > 0)
+                            break;
+                    }
+                    catch {
+                        // continue
+                    }
                 }
             }
-            const strictFactsLocallyFiltered = strictFactsMode
-                ? results.filter((entry) => {
+            let filtered = results;
+            if (searchMode === 'strict_facts') {
+                filtered = results.filter((entry) => {
                     const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
                     const memoryType = String(entry?.metadata?.memory_type || '').toLowerCase();
                     return role === 'user' || role === 'human' || memoryType === 'fact';
-                })
-                : results;
-            const strictBaseResults = strictFactsLocallyFiltered.length > 0 ? strictFactsLocallyFiltered : results;
-            const userOnlyOrAll = strictBaseResults.filter((entry) => {
-                if (searchMode === 'legacy' && includeAssistantMemories)
-                    return true;
-                if (searchMode === 'legacy' && !includeAssistantMemories) {
+                });
+            }
+            else if (searchMode === 'balanced') {
+                filtered = results.filter((entry) => {
+                    const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
+                    return role === 'user' || role === 'human';
+                });
+            }
+            const roleApplied = filtered.length > 0 ? filtered : results;
+            const assistantFiltered = includeAssistantMemories ? roleApplied :
+                roleApplied.filter((entry) => {
                     const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
                     return role === 'user' || role === 'human' || role === 'assistant' || role === 'ai';
-                }
-                if (includeAssistantMemories)
-                    return true;
-                const role = String(entry?.metadata?.role || entry?.role || '').toLowerCase();
-                return role === 'user' || role === 'human';
-            });
-            const roleFiltered = userOnlyOrAll.length > 0 ? userOnlyOrAll : results;
-            const contentSanitized = roleFiltered.filter((entry) => {
+                });
+            const contentSanitized = assistantFiltered.filter((entry) => {
                 const text = toMessageContent(entry).trim();
                 if (!text)
                     return false;
-                // Drop obvious non-memory placeholders.
                 if (text.includes('$input.first().json'))
                     return false;
                 return true;
             });
-            const sanitized = contentSanitized.length > 0 ? contentSanitized : roleFiltered;
-            // De-duplicate by normalized content, keeping the newest instance.
+            const sanitized = contentSanitized.length > 0 ? contentSanitized : assistantFiltered;
             const dedupMap = new Map();
             sanitized.forEach((entry, index) => {
                 const key = toMessageContent(entry).trim().toLowerCase();
@@ -715,7 +492,6 @@ class Mem0Memory {
                     dedupMap.set(key, { entry, index, ts });
                 }
             });
-            // Keep Mem0 search ranking as primary signal; recency only breaks ties.
             const ordered = [...dedupMap.values()].sort((a, b) => {
                 if (a.index !== b.index)
                     return a.index - b.index;
@@ -749,17 +525,6 @@ class Mem0Memory {
             }
             return finalResults.map((entry) => toLangchainMessage(entry));
         };
-        const resolveConversationMessages = async (values, retrieveFn) => {
-            const bufferMessages = await loadConversationMessages();
-            if (conversationRetrievalPolicy === 'buffer_first') {
-                return bufferMessages;
-            }
-            if (conversationRetrievalPolicy === 'search_first') {
-                const searchResults = await retrieveFn(values);
-                return searchResults.length > 0 ? searchResults : bufferMessages;
-            }
-            return shouldFallbackToSearch(values, bufferMessages) ? await retrieveFn(values) : bufferMessages;
-        };
         const memory = BufferWindowMemory
             ? (() => {
                 class SearchFirstBufferMemory extends BufferWindowMemory {
@@ -768,8 +533,7 @@ class Mem0Memory {
                         this.retrieveFn = retrieveFn;
                     }
                     async loadMemoryVariables(values) {
-                        let messages;
-                        messages = await resolveConversationMessages(values, this.retrieveFn);
+                        const messages = await this.retrieveFn(values);
                         return { [this.memoryKey]: messages };
                     }
                 }
@@ -789,9 +553,8 @@ class Mem0Memory {
                 inputKey: 'input',
                 outputKey: 'output',
                 async loadMemoryVariables(values) {
-                    return {
-                        chat_history: await resolveConversationMessages(values, searchMessages)
-                    };
+                    const messages = await searchMessages(values);
+                    return { chat_history: messages };
                 },
                 async saveContext(inputValues, outputValues) {
                     const userInput = String(inputValues?.input || inputValues?.query || inputValues?.human_input || inputValues?.chatInput || '').trim();
@@ -800,15 +563,11 @@ class Mem0Memory {
                         await chatHistory.addUserMessage(userInput);
                     if (assistantOutput)
                         await chatHistory.addAIMessage(assistantOutput);
-                    // Phase 3: Invalidate cache after storing messages
-                    // Forces fresh load on next interaction to get the newest message
-                    Mem0ChatHistory.invalidateCache(scope.user_id, scope.agent_id);
                 },
                 async clear() {
                     return;
                 }
             };
-        // Return memory with correct LangChain key structure
         const wrappedMemory = wrapMemoryResponse(memory, this);
         if (wrappedMemory && typeof wrappedMemory === 'object') {
             wrappedMemory.memoryKey = wrappedMemory.memoryKey || 'chat_history';

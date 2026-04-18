@@ -4,6 +4,179 @@ All notable changes to this project are documented in this file.
 
 This project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 
+## [0.3.0] - 2026-04-18
+
+### BREAKING CHANGES - ARCHITECTURE REDESIGN
+
+MAJOR REDESIGN: v0.3.0 completely removes the Sliding Window Optimization from v0.2.13 in favor of a pure Search-First architecture.
+
+#### What Changed?
+- REMOVED: loadConversationMessages() function and all sliding window logic
+- REMOVED: Static Maps for tracking (lastSeenIndices, cachedMessages, scopeTimestamps)
+- REMOVED: 6 static helper methods for sliding window management
+- ADDED: searchQuery parameter for custom semantic queries
+- ADDED: defaultQuery parameter for fallback queries
+- ADDED: Pure search-first strategy in loadMemoryVariables()
+
+#### Why This Change?
+
+Problem in v0.2.13:
+The sliding window optimization had a critical cache invalidation bug that caused Turn 2 onwards to return old/irrelevant messages. The complex state management (3 static Maps, 6 helper methods) was fragile and not worth the overhead.
+
+Solution in v0.3.0:
+Eliminate all shared state. Use simple, reliable semantic search on every interaction.
+
+#### Behavior Changes
+
+| Aspect | v0.2.13 | v0.3.0 |
+|--------|---------|--------|
+| Turn 1 | Loads ~40 messages | Searches for ~10 relevant messages |
+| Turn 2+ | Sliding window cache | Fresh semantic search |
+| Results | Chronologically sequential | Semantically relevant |
+| Caching | Global state (in-memory) | No caching (fresh) |
+| Complexity | 822 lines | 640 lines (-22%) |
+
+#### Code Changes
+
+Code Reduction:
+- TypeScript: 822 -> 640 lines (-182 lines, -22%)
+- Eliminated 3 static Maps, 6 static methods
+- Stateless design (no shared state issues)
+
+New Parameters:
+- searchQuery (string): Custom query for semantic search
+- defaultQuery (string): Fallback when no user input
+
+#### Migration Guide
+
+If using default configuration: No action needed
+If you relied on sliding window:
+```
+searchQuery = "recent conversation history"
+topK = 50
+defaultQuery = "conversation history"
+```
+
+#### Rollback
+
+npm install n8n-nodes-mem0-self@0.2.13
+
+---
+
+## [0.3.0] - 2026-04-18
+
+### 🚨 BREAKING CHANGES - ARCHITECTURE REDESIGN
+
+**MAJOR REDESIGN**: v0.3.0 completely removes the Sliding Window Optimization from v0.2.13 in favor of a pure **Search-First architecture**.
+
+#### What Changed?
+- ❌ **REMOVED**: `loadConversationMessages()` function and all sliding window logic
+- ❌ **REMOVED**: Static Maps for tracking (lastSeenIndices, cachedMessages, scopeTimestamps)
+- ❌ **REMOVED**: 6 static helper methods for sliding window management
+- ✅ **ADDED**: `searchQuery` parameter for custom semantic queries
+- ✅ **ADDED**: `defaultQuery` parameter for fallback queries
+- ✅ **ADDED**: Pure search-first strategy in `loadMemoryVariables()`
+
+#### Why This Change?
+
+**Problem in v0.2.13:**
+The sliding window optimization, while clever in design, had a critical cache invalidation bug that caused the second interaction (Turn 2) onwards to return old/irrelevant messages. The complex state management (3 static Maps, 6 helper methods, two-phase loading logic) was fragile and not worth the overhead.
+
+**Solution in v0.3.0:**
+Eliminate all shared state. Use simple, reliable semantic search on every interaction. Each query is fresh, relevant, and predictable.
+
+#### Behavior Changes
+
+| Aspect | v0.2.13 | v0.3.0 |
+|--------|---------|--------|
+| **Turn 1** | Loads ~40 messages (bufferLimit × 2) | Searches for ~10 relevant messages |
+| **Turn 2+** | Sliding window, cache-based | Fresh semantic search every time |
+| **Results** | Chronologically sequential | Semantically relevant |
+| **Caching** | Global state (in-memory Maps) | No caching (always fresh) |
+| **Complexity** | 822 lines (v0.2.13) | 640 lines (-22% code reduction) |
+
+#### Migration Guide
+
+**If using default configuration:**
+✅ **No action needed** - Everything works automatically with search-first
+
+**If you relied on sliding window behavior:**
+⚠️ **Configure custom queries**:
+```typescript
+// Use this if you need sequential history:
+searchQuery = "recent conversation history"
+topK = 50  // Get more results
+defaultQuery = "conversation history"
+```
+
+**Breaking API Changes:**
+- `bufferLimit` parameter is now **ignored** (for backward compatibility it still exists)
+- `conversationRetrievalPolicy` parameter is now **ignored** (only search-first active)
+- `fallbackToSearchOnBufferMiss` parameter is now **ignored**
+
+**Non-Breaking (Still Supported):**
+- ✅ searchMode (balanced, strict_facts, all)
+- ✅ maxContextChars (character budget)
+- ✅ storeStrategy (conversation, facts_only)
+- ✅ topK (number of results)
+- ✅ rerank (semantic reranking)
+- ✅ All credential configurations
+
+#### Code Changes
+
+**Code Reduction:**
+- Lines of TypeScript: 822 → 640 (-182 lines, -22%)
+- Complexity: Eliminated 3 static Maps, 6 static methods
+- Reliability: Stateless design (no shared state issues)
+
+**New Parameters:**
+- `searchQuery` (string): Custom query for semantic search
+- `defaultQuery` (string): Fallback when no user input
+
+#### Performance Impact
+
+- **Positive**: Eliminated cache invalidation bugs, simpler codebase, more predictable behavior
+- **Neutral**: Similar API call volume (search on every turn vs. sliding window refresh)
+- **Consideration**: Results are now semantically relevant vs. chronologically sequential (better in most cases)
+
+#### Testing Recommendations
+
+Before deploying v0.3.0 to production:
+1. Test semantic search quality with your domain data
+2. Adjust `topK` and `searchMode` for your use case
+3. Verify results are contextually relevant (not just time-based)
+4. Consider increasing `topK` if important context is being missed
+
+#### Rollback Plan
+
+If you need v0.2.13 behavior:
+```bash
+npm install n8n-nodes-mem0-self@0.2.13
+```
+
+v0.2.13 remains available on npm registry.
+
+#### Full Feature Comparison
+
+| Feature | v0.2.13 | v0.3.0 | Notes |
+|---------|---------|--------|-------|
+| POST /memories | ✅ | ✅ | Message storage identical |
+| POST /search | ✅ | ✅ | Now always used (no buffer fallback) |
+| Sliding window | ✅ | ❌ | REMOVED - caused cache bugs |
+| Custom queries | Limited | ✅ | NEW: searchQuery parameter |
+| Search modes | ✅ | ✅ | Improved filtering |
+| Facts-only storage | ✅ | ✅ | Identical behavior |
+| Semantic search | ✅ | ✅ | Now primary retrieval method |
+
+#### Next Steps (v0.3.1+)
+
+- [ ] Add caching with TTL for performance optimization
+- [ ] Add observability metrics (query times, cache hits, result quality)
+- [ ] Consider hybrid approach (semantic search + buffer combination)
+- [ ] Real-world performance benchmarks
+
+---
+
 ## [0.2.13] - 2026-04-17
 
 ### 🚀 NEW FEATURES
