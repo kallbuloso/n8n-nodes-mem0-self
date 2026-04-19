@@ -553,59 +553,19 @@ class Mem0Memory {
             Mem0ChatHistory.setConversationCache(strictCacheKey, selected);
             return selected.map((entry) => toLangchainMessage(entry));
         };
-        const shouldFallbackToSearch = (values, bufferMessages) => {
-            if (!fallbackToSearchOnBufferMiss)
-                return false;
-            if (bufferMessages.length === 0)
-                return true;
-            const query = String(values?.input || values?.query || values?.human_input || values?.chatInput || values?.text || values?.message || '')
-                .trim()
-                .toLowerCase();
-            if (!query)
-                return false;
-            // Identity/profile recall questions should strongly prefer semantic fallback.
-            const factualRecallPattern = /(qual.*meu nome|meu nome|what.*my name|my name|quem sou eu|who am i|prefer|prefiro|gosto|where.*live|onde eu moro|location|idade|age)/i;
-            if (factualRecallPattern.test(query))
-                return true;
-            const bufferText = bufferMessages
-                .map((m) => String(m?.content || ''))
-                .join(' ')
-                .toLowerCase();
-            const stopwords = new Set([
-                'a', 'an', 'and', 'are', 'as', 'at', 'do', 'for', 'from', 'how', 'i', 'in', 'is', 'it', 'me', 'my', 'of', 'on', 'or', 'the',
-                'to', 'was', 'what', 'where', 'who', 'com', 'como', 'da', 'de', 'do', 'e', 'ele', 'ela', 'em', 'eu', 'isso', 'meu', 'minha',
-                'na', 'no', 'o', 'os', 'para', 'por', 'qual', 'que', 'se', 'uma', 'um', 'yo', 'mi', 'donde', 'el', 'la', 'los', 'las', 'un', 'una'
-            ]);
-            const tokens = query
-                .split(/[^a-z0-9]+/i)
-                .map((t) => t.trim())
-                .filter((t) => t.length >= 3 && !stopwords.has(t));
-            if (tokens.length === 0)
-                return false;
-            const matchedCount = tokens.filter((t) => bufferText.includes(t)).length;
-            const coverage = matchedCount / tokens.length;
-            if (matchedCount === 0)
-                return true;
-            if (tokens.length >= 3 && coverage < 0.6)
-                return true;
-            if (tokens.length >= 5 && matchedCount < 2)
-                return true;
-            return false;
-        };
         const searchMessages = async (values) => {
-            let effectiveQuery = searchQuery || '';
-            if (!effectiveQuery) {
-                effectiveQuery = String(values?.input ||
-                    values?.query ||
-                    values?.human_input ||
-                    values?.chatInput ||
-                    values?.text ||
-                    values?.message ||
-                    '').trim();
-            }
-            if (!effectiveQuery) {
-                effectiveQuery = defaultQuery || FALLBACK_QUERY;
-            }
+            const extractedQuery = String(searchQuery ||
+                values?.input ||
+                values?.query ||
+                values?.human_input ||
+                values?.chatInput ||
+                values?.text ||
+                values?.message ||
+                '').trim();
+            const fallbackAnchor = defaultQuery || FALLBACK_QUERY;
+            const effectiveQuery = extractedQuery
+                ? `${extractedQuery}\n${fallbackAnchor}`
+                : fallbackAnchor;
             if (effectiveQuery.length > MAX_QUERY_LENGTH) {
                 throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Search query is too long. Maximum supported length is ${MAX_QUERY_LENGTH} characters.`);
             }
@@ -631,12 +591,14 @@ class Mem0Memory {
             let results = [];
             let hadSearchError = false;
             let lastSearchError = null;
+            const searchCandidateMultiplier = 4;
+            const candidateTopK = Math.min(50, Math.max(topK, topK * searchCandidateMultiplier));
             const runScopedSearch = async (extraBody = {}) => {
                 let scopedResults = [];
                 for (const scopeCandidate of scopeCandidates) {
                     const body = {
                         query: effectiveQuery,
-                        top_k: topK,
+                        top_k: candidateTopK,
                         rerank,
                         ...scopeCandidate,
                         ...extraBody
@@ -701,6 +663,10 @@ class Mem0Memory {
                     return false;
                 if (text.includes('$input.first().json'))
                     return false;
+                const normalize = (v) => v.toLowerCase().replace(/\s+/g, ' ').trim();
+                const queryComparable = normalize(extractedQuery);
+                if (queryComparable && normalize(text) === queryComparable)
+                    return false;
                 return true;
             });
             const sanitized = contentSanitized.length > 0 ? contentSanitized : assistantFiltered;
@@ -713,7 +679,17 @@ class Mem0Memory {
                     dedupMap.set(key, { entry, index, ts });
                 }
             });
-            const ordered = [...dedupMap.values()].sort((a, b) => {
+            const hasInterrogativeMark = (text) => /\?\s*$/.test(text.trim());
+            const scored = [...dedupMap.values()].map((item) => {
+                const text = toMessageContent(item.entry).trim();
+                let score = 0;
+                if (hasInterrogativeMark(text))
+                    score -= 4;
+                return { ...item, score };
+            });
+            const ordered = scored.sort((a, b) => {
+                if (a.score !== b.score)
+                    return b.score - a.score;
                 if (a.index !== b.index)
                     return a.index - b.index;
                 return b.ts - a.ts;
@@ -769,14 +745,15 @@ class Mem0Memory {
                     return searchResults;
                 return bufferMessages;
             }
-            const fallback = shouldFallbackToSearch(values, bufferMessages);
-            if (!fallback)
+            if (!fallbackToSearchOnBufferMiss)
                 return bufferMessages;
+            // Smart fallback: always try semantic retrieval first; if empty, keep buffer.
+            // This is language-agnostic and ensures AI Agent receives Mem0 /search context.
             const searchResults = await retrieveFn(values);
             if (searchResults.length === 0)
                 return bufferMessages;
-            // Keep a tiny recent conversational tail so chat_history remains Human+AI contextual.
-            const tailSize = Math.min(4, bufferMessages.length);
+            // Keep a tiny conversational tail for continuity while prioritizing semantic facts.
+            const tailSize = Math.min(2, bufferMessages.length);
             const recentTail = tailSize > 0 ? bufferMessages.slice(-tailSize) : [];
             return [...recentTail, ...searchResults];
         };

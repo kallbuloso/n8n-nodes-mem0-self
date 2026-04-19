@@ -53,3 +53,4 @@ v*.md
 README_v*.md
 *_SUMMARY.md
 skills-lock.json
+scripts/debug-memory-recall.js
