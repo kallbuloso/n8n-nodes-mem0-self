@@ -25,8 +25,8 @@
 	"scripts": {
 		"build": "tsc -p tsconfig.json && node scripts/copy-assets.js",
 		"dev": "tsc -w -p tsconfig.json",
-		"format": "prettier --write \"nodes/**/*.ts\" \"credentials/**/*.ts\"",
-		"lint": "eslint \"nodes/**/*.ts\" \"credentials/**/*.ts\" --fix",
+		"format": "prettier --write \"src/nodes/**/*.ts\" \"src/credentials/**/*.ts\"",
+		"lint": "eslint \"src/nodes/**/*.ts\" \"src/credentials/**/*.ts\" --fix",
 		"prepublishOnly": "npm run build"
 	},
 	"keywords": [
@@ -38,7 +38,6 @@
 		"llm",
 		"long-term-memory",
 		"semantic-search",
-		"vector-database",
 		"ai-agent",
 		"agent-id",
 		"langchain",
@@ -71,7 +70,8 @@
 			"dist/credentials/Mem0SelfHostedApi.credentials.js"
 		],
 		"nodes": [
-			"dist/nodes/Mem0/Mem0Memory.node.js"
+			"dist/nodes/Mem0/Mem0Memory.node.js",
+			"dist/nodes/Mem0/Mem0Memory2.node.js"
 		]
 	}
 }

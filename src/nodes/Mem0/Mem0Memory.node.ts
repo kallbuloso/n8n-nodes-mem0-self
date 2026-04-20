@@ -275,6 +275,14 @@ export class Mem0Memory implements INodeType {
         description: 'Number of memory items requested from POST /search'
       },
       {
+        displayName: 'Context Window Length',
+        name: 'contextWindowLength',
+        type: 'number',
+        default: 10,
+        typeOptions: { minValue: 1, maxValue: 200 },
+        description: 'How many past interactions (user+assistant pairs) are returned to chat_history'
+      },
+      {
         displayName: 'Search Query (Optional)',
         name: 'searchQuery',
         type: 'string',
@@ -336,6 +344,10 @@ export class Mem0Memory implements INodeType {
     const runId = String(this.getNodeParameter('runId', itemIndex, '') || '').trim()
     const appId = String(this.getNodeParameter('appId', itemIndex, '') || '').trim()
     const topK = Math.min(100, Math.max(1, Math.floor(Number(this.getNodeParameter('topK', itemIndex, 6) || 6))))
+    const contextWindowLength = Math.min(
+      200,
+      Math.max(1, Math.floor(Number(this.getNodeParameter('contextWindowLength', itemIndex, 10) || 10))
+    ))
     const searchQuery = String(this.getNodeParameter('searchQuery', itemIndex, '') || '').trim()
     const defaultQuery = String(this.getNodeParameter('defaultQuery', itemIndex, FALLBACK_QUERY) || FALLBACK_QUERY).trim()
     const rerank = Boolean(this.getNodeParameter('rerank', itemIndex, false))
@@ -394,24 +406,38 @@ export class Mem0Memory implements INodeType {
         )
       }
 
-      const body: Record<string, unknown> = {
-        query: effectiveQuery,
-        top_k: topK,
-        rerank,
-        ...scope
+      const executeSearch = async (query: string): Promise<any[]> => {
+        const body: Record<string, unknown> = {
+          query,
+          top_k: topK,
+          rerank,
+          ...scope
+        }
+        if (fields && fields.length > 0) body.fields = fields
+
+        const effectiveFilters: Record<string, unknown> = { ...(searchFilters || {}) }
+        if (scope.app_id && effectiveFilters.app_id === undefined) {
+          effectiveFilters.app_id = scope.app_id
+        }
+        if (Object.keys(effectiveFilters).length > 0) body.filters = effectiveFilters
+
+        const response = await mem0ApiRequest.call(this, 'POST', '/search', body)
+        return extractResults(response)
       }
-      if (fields && fields.length > 0) body.fields = fields
 
-      const effectiveFilters: Record<string, unknown> = { ...(searchFilters || {}) }
-      if (scope.app_id && effectiveFilters.app_id === undefined) {
-        effectiveFilters.app_id = scope.app_id
+      let usedQuery = effectiveQuery
+      let results = await executeSearch(usedQuery)
+      let fallbackUsed = false
+
+      // If current input query yields no context, fall back to default profile query.
+      if (results.length === 0 && extractedQuery && defaultQuery && defaultQuery !== effectiveQuery) {
+        fallbackUsed = true
+        usedQuery = defaultQuery
+        results = await executeSearch(usedQuery)
       }
-      if (Object.keys(effectiveFilters).length > 0) body.filters = effectiveFilters
 
-      const response = await mem0ApiRequest.call(this, 'POST', '/search', body)
-      const results = extractResults(response)
-
-      const messages = results
+      const maxMessages = contextWindowLength * 2
+      const limitedEntries = results
         .map((entry: any) => ({
           entry,
           role: String(entry?.metadata?.role || entry?.role || '').toLowerCase(),
@@ -419,15 +445,20 @@ export class Mem0Memory implements INodeType {
         }))
         .filter((x: any) => x.text.length > 0)
         .filter((x: any) => x.role === 'user' || x.role === 'human' || x.role === 'assistant' || x.role === 'ai')
-        .map((x: any) => toLangchainMessage(x.entry))
+        .slice(0, maxMessages)
+
+      const messages = limitedEntries.map((x: any) => toLangchainMessage(x.entry))
 
       if (debugMemory && messages.length > 0) {
         ;(messages[0] as any).additional_kwargs = {
           ...((messages[0] as any).additional_kwargs || {}),
           mem0_debug: {
             source: 'search_only_minimal',
-            query: effectiveQuery,
-            results: messages.length,
+            query: usedQuery,
+            fallbackUsed,
+            results: results.length,
+            returnedMessages: messages.length,
+            contextWindowLength,
             scope
           }
         }
