@@ -70,8 +70,7 @@
 			"dist/credentials/Mem0SelfHostedApi.credentials.js"
 		],
 		"nodes": [
-			"dist/nodes/Mem0/Mem0Memory.node.js",
-			"dist/nodes/Mem0/Mem0Memory2.node.js"
+			"dist/nodes/Mem0/Mem0Memory.node.js"
 		]
 	}
 }

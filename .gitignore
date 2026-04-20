@@ -36,6 +36,7 @@ n8n-workflows-export.json
 workflows/*
 examples/
 scripts/*
+dist/
 
 # OS junk
 .DS_Store
