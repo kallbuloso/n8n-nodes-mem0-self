@@ -57,3 +57,7 @@ README_v*.md
 *_SUMMARY.md
 skills-lock.json
 scripts/debug-memory-recall.js
+src/nodes/Mem0Memory.node.ts.bak
+src/nodes/Mem0Memory.node.ts.bak1
+src/nodes/Mem0Memory2.node.ts
+test-objective-webhook-logic.js
