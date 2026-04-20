@@ -100,9 +100,10 @@ type Mem0Scope = {
   user_id: string
   agent_id: string
   run_id?: string
+  app_id?: string
 }
 
-class Mem0ChatHistory {
+class Mem0ConversationStore {
   private readonly maxMessageLength: number
   private readonly inferOnStore: boolean
 
@@ -129,6 +130,27 @@ class Mem0ChatHistory {
     return normalized
   }
 
+  private normalizeRole(message: any): 'user' | 'assistant' {
+    const role = String(message?.role || message?.type || message?._getType?.() || '').toLowerCase()
+    if (role === 'assistant' || role === 'ai') return 'assistant'
+    return 'user'
+  }
+
+  private normalizeContent(message: any): string {
+    if (typeof message === 'string') return message
+    return String(message?.content ?? '')
+  }
+
+  private buildMetadata(memoryType: string): Record<string, unknown> {
+    const metadata: Record<string, unknown> = {
+      source: 'n8n_mem0_memory_conversational',
+      channel: 'chat',
+      memory_type: memoryType
+    }
+    if (this.scope.app_id) metadata.app_id = this.scope.app_id
+    return metadata
+  }
+
   async addConversationTurn(userMessage?: string, assistantMessage?: string): Promise<void> {
     const user = this.normalize('user', userMessage || '')
     const assistant = this.normalize('assistant', assistantMessage || '')
@@ -141,13 +163,54 @@ class Mem0ChatHistory {
     await mem0ApiRequest.call(this.ctx, 'POST', '/memories', {
       messages,
       infer: this.inferOnStore,
-      metadata: {
-        source: 'n8n_mem0_memory_conversational',
-        channel: 'chat',
-        memory_type: 'conversation'
-      },
+      metadata: this.buildMetadata('conversation'),
       ...this.scope
     })
+  }
+
+  async addMessage(message: any): Promise<void> {
+    const role = this.normalizeRole(message)
+    const content = this.normalizeContent(message)
+    const normalized = this.normalize(role, content)
+    if (!normalized) return
+    await mem0ApiRequest.call(this.ctx, 'POST', '/memories', {
+      messages: [{ role, content: normalized }],
+      infer: this.inferOnStore,
+      metadata: this.buildMetadata('conversation'),
+      ...this.scope
+    })
+  }
+
+  async addMessages(messages: any[]): Promise<void> {
+    for (const message of messages || []) {
+      await this.addMessage(message)
+    }
+  }
+
+  async addUserMessage(message: string): Promise<void> {
+    const normalized = this.normalize('user', message)
+    if (!normalized) return
+    await mem0ApiRequest.call(this.ctx, 'POST', '/memories', {
+      messages: [{ role: 'user', content: normalized }],
+      infer: this.inferOnStore,
+      metadata: this.buildMetadata('conversation'),
+      ...this.scope
+    })
+  }
+
+  async addAIMessage(message: string): Promise<void> {
+    const normalized = this.normalize('assistant', message)
+    if (!normalized) return
+    await mem0ApiRequest.call(this.ctx, 'POST', '/memories', {
+      messages: [{ role: 'assistant', content: normalized }],
+      infer: this.inferOnStore,
+      metadata: this.buildMetadata('conversation'),
+      ...this.scope
+    })
+  }
+
+  async addAIChatMessage(message: string): Promise<void> {
+    await this.addAIMessage(message)
   }
 
   async getMessages(): Promise<any[]> {
@@ -195,6 +258,13 @@ export class Mem0Memory implements INodeType {
         type: 'string',
         default: '',
         description: 'Optional conversation/session identifier'
+      },
+      {
+        displayName: 'App ID',
+        name: 'appId',
+        type: 'string',
+        default: '',
+        description: 'Optional application identifier for memory segmentation'
       },
       {
         displayName: 'Top K',
@@ -264,6 +334,7 @@ export class Mem0Memory implements INodeType {
     const userId = String(this.getNodeParameter('userId', itemIndex, '') || '').trim()
     const agentId = String(this.getNodeParameter('agentId', itemIndex, '') || '').trim()
     const runId = String(this.getNodeParameter('runId', itemIndex, '') || '').trim()
+    const appId = String(this.getNodeParameter('appId', itemIndex, '') || '').trim()
     const topK = Math.min(100, Math.max(1, Math.floor(Number(this.getNodeParameter('topK', itemIndex, 6) || 6))))
     const searchQuery = String(this.getNodeParameter('searchQuery', itemIndex, '') || '').trim()
     const defaultQuery = String(this.getNodeParameter('defaultQuery', itemIndex, FALLBACK_QUERY) || FALLBACK_QUERY).trim()
@@ -282,8 +353,9 @@ export class Mem0Memory implements INodeType {
       agent_id: agentId
     }
     if (runId) scope.run_id = runId
+    if (appId) scope.app_id = appId
 
-    const chatHistory = new Mem0ChatHistory(this, scope, {
+    const conversationStore = new Mem0ConversationStore(this, scope, {
       maxMessageLength: MAX_MESSAGE_LENGTH,
       inferOnStore
     })
@@ -298,7 +370,12 @@ export class Mem0Memory implements INodeType {
     let searchFilters: Record<string, unknown> | undefined
     if (searchFiltersInput) {
       try {
-        searchFilters = JSON.parse(searchFiltersInput)
+        const parsedFilters = JSON.parse(searchFiltersInput)
+        if (parsedFilters && typeof parsedFilters === 'object' && !Array.isArray(parsedFilters)) {
+          searchFilters = parsedFilters as Record<string, unknown>
+        } else {
+          throw new Error('Filters must be a JSON object')
+        }
       } catch {
         throw new NodeOperationError(this.getNode(), 'Search Filters (JSON) is not valid JSON.')
       }
@@ -308,8 +385,7 @@ export class Mem0Memory implements INodeType {
       const extractedQuery = String(
         searchQuery || values?.input || values?.query || values?.human_input || values?.chatInput || values?.text || values?.message || ''
       ).trim()
-      const anchor = defaultQuery || FALLBACK_QUERY
-      const effectiveQuery = extractedQuery ? `${extractedQuery}\n${anchor}` : anchor
+      const effectiveQuery = extractedQuery || defaultQuery || FALLBACK_QUERY
 
       if (effectiveQuery.length > MAX_QUERY_LENGTH) {
         throw new NodeOperationError(
@@ -325,7 +401,12 @@ export class Mem0Memory implements INodeType {
         ...scope
       }
       if (fields && fields.length > 0) body.fields = fields
-      if (searchFilters && Object.keys(searchFilters).length > 0) body.filters = searchFilters
+
+      const effectiveFilters: Record<string, unknown> = { ...(searchFilters || {}) }
+      if (scope.app_id && effectiveFilters.app_id === undefined) {
+        effectiveFilters.app_id = scope.app_id
+      }
+      if (Object.keys(effectiveFilters).length > 0) body.filters = effectiveFilters
 
       const response = await mem0ApiRequest.call(this, 'POST', '/search', body)
       const results = extractResults(response)
@@ -357,22 +438,21 @@ export class Mem0Memory implements INodeType {
 
     const memory = {
       memoryKey: 'chat_history',
-      chatHistory,
       returnMessages: true,
       inputKey: 'input',
       outputKey: 'output',
+      chatHistory: conversationStore,
       async loadMemoryVariables(values: any) {
         const messages = await searchMessages(values)
         const key = String((this as any).memoryKey || 'chat_history')
         return {
-          [key]: messages,
-          chat_history: messages
+          [key]: messages
         }
       },
       async saveContext(inputValues: any, outputValues: any) {
         const userInput = String(inputValues?.input || inputValues?.query || inputValues?.human_input || inputValues?.chatInput || '').trim()
         const assistantOutput = String(outputValues?.output || outputValues?.response || outputValues?.text || '').trim()
-        await chatHistory.addConversationTurn(userInput, assistantOutput)
+        await conversationStore.addConversationTurn(userInput, assistantOutput)
       },
       async clear() {
         return
