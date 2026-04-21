@@ -121,6 +121,14 @@ function wrapMemoryResponse(memory: any, ctx: ISupplyDataFunctions): any {
   return memory
 }
 
+function pickFirstText(source: any, keys: string[]): string {
+  for (const key of keys) {
+    const value = source?.[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return ''
+}
+
 class Mem0ChatHistory {
   private readonly maxMessageLength: number
   private readonly maxMessages: number
@@ -156,6 +164,7 @@ class Mem0ChatHistory {
       metadata: {
         source: 'n8n_mem0_chat_memory',
         channel: 'chat',
+        memory_type: 'conversational',
         role
       },
       ...this.scope
@@ -214,6 +223,24 @@ class Mem0ChatHistory {
 
   async clear(): Promise<void> {
     return
+  }
+}
+
+class Mem0BufferWindowMemory extends BufferWindowMemory {
+  constructor(...args: any[]) {
+    super(...args)
+  }
+
+  async saveContext(inputValues: any, outputValues: any): Promise<void> {
+    const userInput = pickFirstText(inputValues, ['input', 'chatInput', 'human_input', 'query', 'message', 'text'])
+    const assistantOutput = pickFirstText(outputValues, ['output', 'response', 'text', 'answer', 'result'])
+
+    if (userInput && this.chatHistory?.addUserMessage) {
+      await this.chatHistory.addUserMessage(userInput)
+    }
+    if (assistantOutput && this.chatHistory?.addAIMessage) {
+      await this.chatHistory.addAIMessage(assistantOutput)
+    }
   }
 }
 
@@ -299,7 +326,7 @@ export class Mem0Memory implements INodeType {
 
     const chatHistory = new Mem0ChatHistory(this, scope, contextWindowLength)
 
-    const memory = new BufferWindowMemory({
+    const memory = new Mem0BufferWindowMemory({
       memoryKey: 'chat_history',
       chatHistory,
       returnMessages: true,
