@@ -55,6 +55,7 @@ RELEASE_NOTES.md
 *.py
 *.sh
 v*.md
+n8n*.tgz
 README_v*.md
 *_SUMMARY.md
 skills-lock.json
