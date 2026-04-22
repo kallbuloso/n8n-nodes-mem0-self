@@ -109,7 +109,7 @@ function resolveMemoryContent(memory: Record<string, any>): string {
 }
 
 function resolveCreatedAt(memory: Record<string, any>, index: number): number {
-  const value = memory.created_at ?? memory.createdAt ?? memory.updated_at ?? memory.updatedAt ?? memory.timestamp ?? memory.time
+  const value = memory.updated_at ?? memory.updatedAt ?? memory.created_at ?? memory.createdAt ?? memory.timestamp ?? memory.time
   const time = value ? new Date(value).getTime() : Number.NaN
   return Number.isFinite(time) ? time : index
 }
@@ -122,9 +122,30 @@ function wrapMemoryResponse(memory: any, ctx: ISupplyDataFunctions): any {
 }
 
 function pickFirstText(source: any, keys: string[]): string {
+  const extractText = (value: any): string => {
+    if (typeof value === 'string') return value.trim()
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const text = extractText(item)
+        if (text) return text
+      }
+      return ''
+    }
+    if (value && typeof value === 'object') {
+      const priorityKeys = ['output', 'response', 'text', 'answer', 'content', 'message']
+      for (const key of priorityKeys) {
+        const text = extractText(value[key])
+        if (text) return text
+      }
+      return ''
+    }
+    return ''
+  }
+
   for (const key of keys) {
-    const value = source?.[key]
-    if (typeof value === 'string' && value.trim()) return value.trim()
+    const text = extractText(source?.[key])
+    if (text) return text
   }
   return ''
 }
