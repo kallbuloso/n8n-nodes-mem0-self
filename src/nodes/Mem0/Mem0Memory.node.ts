@@ -121,6 +121,23 @@ function wrapMemoryResponse(memory: any, ctx: ISupplyDataFunctions): any {
   return memory
 }
 
+function cleanConversationText(input: string): string {
+  let text = String(input ?? '')
+  text = text.replace(/\r\n/g, '\n')
+  text = text.replace(/[^\P{C}\n\t]/gu, '')
+  text = text.replace(/[ \t]{2,}/g, ' ')
+  text = text.replace(/\n{3,}/g, '\n\n')
+  return text.trim()
+}
+
+function looksLikeMachinePayload(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed) return false
+  const startsLikeJson = trimmed.startsWith('{') || trimmed.startsWith('[')
+  if (!startsLikeJson) return false
+  return /"tool_calls"|"entities"|"arguments"/.test(trimmed)
+}
+
 function pickFirstText(source: any, keys: string[]): string {
   const extractText = (value: any): string => {
     if (typeof value === 'string') return value.trim()
@@ -164,8 +181,9 @@ class Mem0ChatHistory {
   }
 
   private normalizeContent(role: Role, content: string): string {
-    const normalized = String(content || '').trim()
+    const normalized = cleanConversationText(content || '')
     if (!normalized) return ''
+    if (looksLikeMachinePayload(normalized)) return ''
     if (normalized.length > this.maxMessageLength) {
       throw new NodeOperationError(
         this.ctx.getNode(),
